@@ -799,6 +799,12 @@ html, body {
   animation: spin 0.8s linear infinite;
 }
 
+.action-btn-ai:disabled {
+  opacity: 0.82;
+  cursor: wait;
+  filter: saturate(0.85);
+}
+
 @keyframes spin {
   to { transform: rotate(360deg); }
 }

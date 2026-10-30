@@ -1,3 +1,31 @@
+# Changelog
+
+## 1.0.10 — Bounded Gemini first-token wait and study-frame selection
+
+- Adds a 30-second first-text-token timeout to each Gemini request. The timeout ends as soon as the first non-empty text delta arrives; it does not cap a successful stream after output begins. Timed-out primary attempts fall through to the configured fallback model. Once a fallback succeeds, it becomes preferred for the rest of the extension session to avoid repeating the same wait on each interval; saving model settings or reloading resets the preference. Explicit parent cancellation remains a cancellation and does not trigger fallback.
+- Sends `thinkingConfig` only to the configured primary model. The known fallback model is sent without that unsupported option, avoiding the extra HTTP 400 and duplicate retry observed in v1.0.9. The primary-model compatibility retry remains when a 400 rejects `thinkingConfig`.
+- Adds a passive frame sampler that checks a 320×180 frame every 2.5 seconds while AI Notes is active, without changing video playback or seeking. It retains the best quality-scored frame per minute (20-bucket cap) and selects the highest-scoring candidate within the current transcript interval.
+- Adds a local edge-density / distributed-detail screen. A frame failing the threshold is not attached to Gemini or saved as an automatic study screenshot; transcript-based generation continues. Manual screenshots are unchanged. The heuristic is not OCR, legibility detection, face detection, or semantic understanding.
+- Calibrates the local screenshot heuristic against the supplied v1.0.9 images: 01:19 talking-head/flag image rejected (score 29); 04:00 slide image accepted (score 88).
+- Updates the system prompt to attribute instructor promises, guarantees, opinions, and personal claims rather than presenting them as verified facts.
+- Adds regression tests for first-token timeout fallback, model-specific generation settings, and slide-like frame scoring.
+- Bumps manifest, sidebar UI, README, VERSION.txt and changelog to `1.0.10`.
+- Automated tests do not prove live Gemini fallback latency or screenshot quality across different lecture styles; run the short Chrome smoke test before the 30-minute benchmark.
+
+## 1.0.9 — Performance diagnostics and controlled Stop finalization
+
+- Adds structured timing for caption-track discovery, player caption-response wait/chunk delivery, caption parsing, transcript-slice filtering, screenshot capture, screenshot persistence, Gemini requests, Markdown rendering, and note saving.
+- Adds Gemini attempt diagnostics with provider/model, configured key-slot number (never key material), HTTP status, fallback/retry reason, response-header latency, time to first generated text, stream duration, and generated-character count.
+- Emits one performance report per processing interval and a run summary containing wall-clock duration and summed AI-processing time. Diagnostic logs do not include API keys, prompts, transcript text, image data, or caption bodies.
+- Captures the player timestamp when Stop is requested, guards the async Stop-boundary race, and bounds the final transcript flush to that timestamp. A frame captured beyond the frozen boundary is omitted rather than mislabeled with an earlier timestamp; screenshot-response timing cannot shorten the transcript interval.
+- Changes the post-Stop UI to show `Finishing…`, a persistent spinner, and `Finishing notes…` / interval-specific status until the final flush and save complete.
+- Prevents an automatic second flush after a failed in-flight generation; failed intervals remain uncommitted so the user can inspect the error rather than silently waiting through a duplicate attempt.
+- Batches streamed Markdown preview rendering to at most one whole-document render every 150 ms, with a forced final render before persistence.
+- Keeps the caption acquisition strategy, 40 MiB caption limit, 192 KiB chunk relay, evidence-first prompt, configured model order, API-key rotation policy, 300-second AI segment size, and output format unchanged.
+- Adds regression tests for Gemini performance event reporting, Stop-boundary/finalization invariants, caption timing metadata, and transcript-cache-hit reporting.
+- Bumps manifest, sidebar UI, README, VERSION.txt and changelog to `1.0.9`.
+- Automated tests validate instrumentation and control-flow invariants; only a live Chrome run can establish actual end-to-end processing times and whether the performance bottleneck has been identified.
+
 
 ## 1.0.8 — Large caption response chunk relay
 
@@ -10,7 +38,6 @@
 - Bumps manifest, sidebar UI, README, VERSION.txt and changelog to `1.0.8`.
 - Automated tests do not prove live Chrome/YouTube extraction; the user's 2-minute smoke test remains required.
 
-# Changelog
 
 ## 1.0.7 — Player-issued YouTube caption response observer
 

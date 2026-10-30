@@ -28,13 +28,86 @@
     isGeneratingAI: false,
     activeGenerationController: null,
     flushAfterCurrentGeneration: false,
+    stopRequestedAt: null,
+    stopBoundaryReady: false,
+    lastGenerationOutcome: null,
+    isFinalizing: false,
+    aiRunMetrics: null,
     generationSettled: null,
     autoSaveTimer: null,
+    previewRenderTimer: null,
+    previewRenderMetrics: { count: 0, totalDurationMs: 0, maxDurationMs: 0 },
     isDirty: false,
     // Per-video tracking
     lastProcessedTime: 0,
     imageCache: new Map() // relative path / filename -> base64 dataUrl
   };
+
+  function perfNow() {
+    return (typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now();
+  }
+
+  function elapsedMs(startedAt) {
+    return Math.max(0, Math.round(perfNow() - startedAt));
+  }
+
+  function logPerformance(label, details) {
+    // Only durations, counts, provider/model identifiers and key-slot numbers are logged.
+    // Never log API keys, prompt text, transcript text, image data or caption bodies.
+    console.info(`[HoverNotes Performance] ${label}`, details);
+  }
+
+  function setFinalizingUI(active, message = 'Finishing notes…') {
+    state.isFinalizing = Boolean(active);
+    elements.aiLoadingSpinner.classList.toggle('hidden', !active && !state.isGeneratingAI);
+    elements.aiStatusIndicator.classList.toggle('hidden', !active && !state.isAutoNotesActive);
+    elements.btnAiNotes.disabled = Boolean(active);
+    if (elements.aiBtnText) elements.aiBtnText.textContent = active ? 'Finishing…' : 'AI Notes';
+    elements.btnAiNotes.title = active
+      ? 'Finishing the captured lecture interval. Please wait for the save confirmation.'
+      : 'Toggle Auto-Notes Continuous Lecture Watcher';
+    if (active) {
+      elements.aiStatusText.textContent = message;
+      showSaveStatus(message, false, true);
+    }
+  }
+
+  function finishAutoNotesSession(stopAtTime) {
+    void sendBridgeMessage('STOP_STUDY_FRAME_SAMPLER');
+    const run = state.aiRunMetrics;
+    if (run) {
+      const generations = run.generations || [];
+      const processedGenerations = generations.filter(item => item.transcriptLines > 0 || item.generatedCharacters > 0);
+      logPerformance('AI Notes run completed', {
+        videoId: run.videoId,
+        stopAt: Number.isFinite(stopAtTime) ? formatTime(stopAtTime) : null,
+        wallClockMs: elapsedMs(run.startedAt),
+        generationCount: processedGenerations.length,
+        operationCount: generations.length,
+        sumGenerationMs: processedGenerations.reduce((sum, item) => sum + (item.totalMs || 0), 0),
+        sumGeminiMs: processedGenerations.reduce((sum, item) => sum + (item.stages?.geminiMs || 0), 0),
+        transcriptCharacters: processedGenerations.reduce((sum, item) => sum + (item.transcriptCharacters || 0), 0),
+        generatedCharacters: processedGenerations.reduce((sum, item) => sum + (item.generatedCharacters || 0), 0),
+        generations: processedGenerations.map(item => ({
+          interval: item.interval,
+          totalMs: item.totalMs,
+          geminiMs: item.stages?.geminiMs || 0,
+          generatedCharacters: item.generatedCharacters || 0,
+          outcome: item.outcome
+        }))
+      });
+    }
+    state.aiRunMetrics = null;
+    state.stopRequestedAt = null;
+    state.stopBoundaryReady = false;
+    state.lastGenerationOutcome = null;
+    state.flushAfterCurrentGeneration = false;
+    setFinalizingUI(false);
+    elements.aiStatusIndicator.classList.add('hidden');
+    elements.aiLoadingSpinner.classList.add('hidden');
+  }
 
   // DOM Elements
   const elements = {
@@ -180,6 +253,12 @@
       toggleAutoNotes(false, { abortActive: true });
       if (state.generationSettled) await state.generationSettled;
     }
+
+    state.stopRequestedAt = null;
+    state.stopBoundaryReady = false;
+    state.lastGenerationOutcome = null;
+    state.isFinalizing = false;
+    state.aiRunMetrics = null;
 
     if (state.isDirty && state.currentVideoId) {
       await saveCurrentNote();
@@ -336,8 +415,9 @@ tags: [hovernotes, gate-cs, study-notes]
   function appendTextToEnd(text) {
     const editor = elements.noteEditor;
     editor.value += text;
-    editor.scrollTop = editor.scrollHeight;
-    renderMarkdownPreview();
+    // Streaming output can arrive in many small SSE deltas. Batch the expensive
+    // whole-document Markdown parse/DOM replacement to at most ~7 times per second.
+    scheduleMarkdownPreviewRender();
     // Defer persistence until the complete AI chunk has succeeded. This prevents
     // half-written streamed output from being mistaken for a completed checkpoint.
     if (!state.isGeneratingAI) scheduleAutoSave();
@@ -349,16 +429,16 @@ tags: [hovernotes, gate-cs, study-notes]
 
   // Capture a frame in memory first. AI generation persists it only after the
   // text request succeeds, preventing orphaned image files on transcript/API errors.
-  async function captureFrameData(fallbackSeconds = 0) {
-    const frameRes = await sendBridgeMessage('CAPTURE_FRAME');
-    if (!frameRes || !frameRes.success || !frameRes.dataUrl) {
-      throw new Error(frameRes?.error || 'Frame capture failed');
-    }
-    const capturedSeconds = Math.floor(frameRes.videoState?.currentTime ?? fallbackSeconds ?? 0);
+  async function captureFrameData(fallbackSeconds = 0, selection = {}) {
+    const frameRes = await sendBridgeMessage('CAPTURE_FRAME', selection);
+    if (!frameRes || !frameRes.success) throw new Error(frameRes?.error || 'Frame capture failed');
+    const capturedSeconds = Math.floor(Number.isFinite(frameRes.frameTime)
+      ? frameRes.frameTime : (frameRes.videoState?.currentTime ?? fallbackSeconds ?? 0));
     return {
-      dataUrl: frameRes.dataUrl,
+      dataUrl: frameRes.dataUrl || null,
       seconds: capturedSeconds,
-      timestamp: formatTime(capturedSeconds)
+      timestamp: formatTime(capturedSeconds),
+      quality: frameRes.frameQuality || null
     };
   }
 
@@ -461,10 +541,22 @@ tags: [hovernotes, gate-cs, study-notes]
   function toggleAutoNotes(forceState, options = {}) {
     const nextState = (forceState !== undefined) ? forceState : !state.isAutoNotesActive;
     if (nextState === state.isAutoNotesActive && !options.abortActive) return;
+    if (state.isFinalizing && nextState) return;
 
     if (nextState) {
       state.isAutoNotesActive = true;
+      state.stopRequestedAt = null;
+      state.stopBoundaryReady = false;
+      state.lastGenerationOutcome = null;
+      state.flushAfterCurrentGeneration = false;
+      state.aiRunMetrics = {
+        videoId: state.currentVideoId,
+        startedAt: perfNow(),
+        generations: []
+      };
       elements.btnAiNotes.classList.add('recording-active');
+      elements.btnAiNotes.disabled = false;
+      elements.btnAiNotes.title = 'Stop automatic lecture notes and finish the captured interval';
       if (elements.aiBtnText) elements.aiBtnText.textContent = 'Stop';
       elements.aiStatusIndicator.classList.remove('hidden');
       elements.aiStatusText.textContent = 'AI is watching lecture...';
@@ -486,6 +578,7 @@ tags: [hovernotes, gate-cs, study-notes]
               return;
             }
           }
+          void sendBridgeMessage('START_STUDY_FRAME_SAMPLER');
           await triggerAutoNotesSynthesis(); // No-op at 00:00 until real video time has elapsed.
         } catch (err) {
           toggleAutoNotes(false);
@@ -498,6 +591,10 @@ tags: [hovernotes, gate-cs, study-notes]
         if (!state.isAutoNotesActive || state.isGeneratingAI) return;
         try {
           const video = await queryVideoState();
+          // Stop can be clicked while this interval's GET_VIDEO_STATE bridge call is
+          // pending. Recheck the flag after await so the monitor cannot launch a new
+          // generation after the user has already requested Stop.
+          if (!state.isAutoNotesActive) return;
           const current = Math.floor(video.currentTime || 0);
           if (!video.paused && current - state.lastProcessedTime >= 60) {
             await triggerAutoNotesSynthesis();
@@ -507,9 +604,12 @@ tags: [hovernotes, gate-cs, study-notes]
         }
       }, 10000);
     } else {
+      void sendBridgeMessage('STOP_STUDY_FRAME_SAMPLER');
       state.isAutoNotesActive = false;
       elements.btnAiNotes.classList.remove('recording-active');
       if (elements.aiBtnText) elements.aiBtnText.textContent = 'AI Notes';
+      elements.btnAiNotes.disabled = false;
+      elements.btnAiNotes.title = 'Toggle Auto-Notes Continuous Lecture Watcher';
       if (state.autoNotesInterval) {
         clearInterval(state.autoNotesInterval);
         state.autoNotesInterval = null;
@@ -517,30 +617,111 @@ tags: [hovernotes, gate-cs, study-notes]
 
       if (options.abortActive && state.activeGenerationController) {
         state.flushAfterCurrentGeneration = false;
+        state.stopRequestedAt = null;
+        state.stopBoundaryReady = false;
+        state.lastGenerationOutcome = null;
+        state.isFinalizing = false;
         state.activeGenerationController.abort();
-      } else if (state.isGeneratingAI) {
-        // Stop scheduling new segments, finish the active one, then flush any tail.
-        state.flushAfterCurrentGeneration = true;
-        elements.aiStatusText.textContent = 'Finishing current segment…';
-        showSaveStatus('Finishing current segment and saving remaining lecture time…');
-        return;
       } else {
-        elements.aiStatusIndicator.classList.add('hidden');
-        showSaveStatus(options.abortActive ? 'AI generation cancelled' : 'Flushing remaining lecture time…');
-        if (!options.abortActive) {
-          state.flushAfterCurrentGeneration = false;
-          triggerAutoNotesSynthesis({ force: true });
+        state.flushAfterCurrentGeneration = false;
+        state.stopRequestedAt = null;
+        state.stopBoundaryReady = false;
+        state.lastGenerationOutcome = null;
+        state.isFinalizing = false;
+        if (!state.isGeneratingAI) {
+          elements.aiStatusIndicator.classList.add('hidden');
+          elements.aiLoadingSpinner.classList.add('hidden');
         }
-        return;
       }
 
-      elements.aiStatusIndicator.classList.add('hidden');
-      showSaveStatus('AI generation cancelled');
+      if (options.abortActive) {
+        elements.aiStatusIndicator.classList.add('hidden');
+        elements.aiLoadingSpinner.classList.add('hidden');
+        showSaveStatus('AI generation cancelled');
+      }
     }
   }
 
+  // Stop monitoring immediately, then freeze the current YouTube timestamp before
+  // allowing an in-flight generation to finish and the final interval to be flushed.
+  async function handleAutoNotesButtonClick() {
+    if (state.isFinalizing) return;
+    if (!state.isAutoNotesActive) {
+      toggleAutoNotes(true);
+      return;
+    }
+
+    const videoIdAtStop = state.currentVideoId;
+    const generationWasActiveAtStop = state.isGeneratingAI;
+    state.isAutoNotesActive = false;
+    state.stopBoundaryReady = false;
+    state.stopRequestedAt = Math.max(0, Math.floor(state.videoState.currentTime || 0));
+    state.flushAfterCurrentGeneration = generationWasActiveAtStop;
+    if (state.autoNotesInterval) {
+      clearInterval(state.autoNotesInterval);
+      state.autoNotesInterval = null;
+    }
+    elements.btnAiNotes.classList.remove('recording-active');
+    setFinalizingUI(true, 'Capturing stop position…');
+    elements.aiLoadingSpinner.classList.remove('hidden');
+
+    let stopAtTime = Math.floor(state.videoState.currentTime || 0);
+    try {
+      const video = await queryVideoState();
+      if (videoIdAtStop && video.videoId && video.videoId !== videoIdAtStop) {
+        throw new DOMException('Video changed while stopping AI Notes.', 'AbortError');
+      }
+      const queriedCurrentTime = Number(video.currentTime);
+      if (Number.isFinite(queriedCurrentTime) && queriedCurrentTime >= 0) {
+        stopAtTime = Math.floor(queriedCurrentTime);
+      }
+    } catch (err) {
+      if (err.name === 'AbortError') {
+        console.info('[HoverNotes AI] Stop cancelled because the video changed.');
+        finishAutoNotesSession(stopAtTime);
+        return;
+      }
+      console.warn('[HoverNotes AI] Could not refresh stop position; using the latest known timestamp.');
+    }
+
+    if (videoIdAtStop !== state.currentVideoId) {
+      finishAutoNotesSession(stopAtTime);
+      return;
+    }
+
+    state.stopRequestedAt = Math.max(0, stopAtTime);
+    state.stopBoundaryReady = true;
+    const boundaryLabel = formatTime(state.stopRequestedAt);
+    if (state.isGeneratingAI) {
+      // The active request owns its original interval. Once it commits, process only
+      // the remaining interval up to this frozen stop boundary.
+      state.flushAfterCurrentGeneration = true;
+      setFinalizingUI(true, `Finishing notes through ${boundaryLabel}…`);
+      console.info('[HoverNotes AI] Stop requested; active generation will finish before final flush.', {
+        stopAt: boundaryLabel,
+        lastProcessedAt: formatTime(state.lastProcessedTime)
+      });
+      return;
+    }
+
+    state.flushAfterCurrentGeneration = false;
+    if (generationWasActiveAtStop && !['saved', 'no-new-interval'].includes(state.lastGenerationOutcome)) {
+      // If the in-flight request failed while the stop-position query was pending,
+      // do not silently retry that same interval as a final flush.
+      finishAutoNotesSession(state.stopRequestedAt);
+      return;
+    }
+    setFinalizingUI(true, `Generating final notes through ${boundaryLabel}…`);
+    void triggerAutoNotesSynthesis({
+      force: true,
+      endTimeLimit: state.stopRequestedAt,
+      isFinalFlush: true
+    });
+  }
+
   // Process only newly elapsed video time. Advance the checkpoint after a successful save.
-  async function triggerAutoNotesSynthesis({ force = false } = {}) {
+  // endTimeLimit is captured when Stop is clicked so an in-flight request cannot move the boundary.
+  async function triggerAutoNotesSynthesis({ force = false, endTimeLimit = null, isFinalFlush = false } = {}) {
     if (state.isGeneratingAI) return false;
 
     state.isGeneratingAI = true;
@@ -554,30 +735,76 @@ tags: [hovernotes, gate-cs, study-notes]
     const startTime = Math.floor(state.lastProcessedTime || 0);
     let endTime = startTime;
     let didAppend = false;
+    const startedAt = perfNow();
+    const previewStart = { ...state.previewRenderMetrics };
+    const report = {
+      videoId: videoIdAtStart,
+      interval: `${formatTime(startTime)}–pending`,
+      startTime,
+      endTime: null,
+      totalMs: 0,
+      stages: {},
+      transcriptLines: 0,
+      transcriptCharacters: 0,
+      generatedCharacters: 0,
+      segmentCount: 0,
+      geminiAttempts: [],
+      outcome: 'failed'
+    };
 
     elements.aiLoadingSpinner.classList.remove('hidden');
     elements.aiStatusIndicator.classList.remove('hidden');
-    elements.aiStatusText.textContent = 'Preparing transcript and visual evidence…';
-    showSaveStatus('Preparing lecture segment…');
+    elements.aiStatusText.textContent = isFinalFlush ? 'Generating final notes…' : 'Preparing transcript and visual evidence…';
+    showSaveStatus(isFinalFlush ? 'Generating final lecture notes…' : 'Preparing lecture segment…', false, true);
 
     try {
+      let stageStartedAt = perfNow();
       const video = await queryVideoState();
+      report.stages.videoStateMs = elapsedMs(stageStartedAt);
       endTime = Math.floor(video.currentTime || 0);
+      if (Number.isFinite(endTimeLimit)) endTime = Math.min(endTime, Math.floor(endTimeLimit));
       if (!videoIdAtStart || videoIdAtStart !== state.currentVideoId) throw new DOMException('Video changed.', 'AbortError');
-      if (endTime <= startTime || (!force && endTime - startTime < 60)) return false;
+      if (endTime <= startTime || (!force && endTime - startTime < 60)) {
+        report.outcome = 'no-new-interval';
+        return false;
+      }
       if (!state.vaultConnected) throw new Error('Connect your Obsidian vault before generating notes.');
 
       const title = elements.noteTitleInput.value.trim() || video.videoTitle || 'Lecture';
       const videoUrl = video.videoUrl || window.location.href;
 
-      // Capture in memory (not on disk) and use the actual frame timestamp.
-      // Do not persist/embed the frame unless transcript extraction and AI synthesis succeed.
-      const frameData = await captureFrameData(endTime);
-      endTime = frameData.seconds;
-      if (endTime <= startTime) throw new Error('The captured frame did not advance beyond the last processed timestamp.');
+      // Select the best sampled slide-like frame in this interval without seeking.
+      // Do not persist/embed it unless transcript extraction and AI synthesis succeed.
+      stageStartedAt = perfNow();
+      const frameData = await captureFrameData(endTime, {
+        selectBestStudyFrame: true, startTime, endTime
+      });
+      report.stages.frameCaptureMs = elapsedMs(stageStartedAt);
+      const capturedFrameTime = Number.isFinite(frameData.seconds) ? Math.floor(frameData.seconds) : null;
+      let includeCapturedFrame = Boolean(frameData.dataUrl && frameData.quality?.isStudyRelevant);
+      report.frameQuality = frameData.quality || null;
+      if (!includeCapturedFrame) report.screenshotSkipped = frameData.quality?.reason || 'No study-relevant frame was available in this interval.';
+      if (Number.isFinite(endTimeLimit)) {
+        const frozenBoundary = Math.floor(endTimeLimit);
+        // Keep transcript boundaries independent of the selected screenshot timestamp.
+        endTime = Math.min(endTime, frozenBoundary);
+        // Never label a later visual frame with an earlier timestamp. If playback moved
+        // after Stop, keep transcript processing bounded and omit that out-of-range frame.
+        includeCapturedFrame = includeCapturedFrame && capturedFrameTime !== null && capturedFrameTime <= frozenBoundary;
+        if (frameData.dataUrl && capturedFrameTime !== null && capturedFrameTime > frozenBoundary) {
+          report.screenshotSkipped = 'The captured frame was after the frozen Stop boundary.';
+          console.warn('[HoverNotes AI] Screenshot omitted because capture occurred after Stop.', {
+            capturedFrameAt: formatTime(capturedFrameTime),
+            stopBoundary: formatTime(frozenBoundary)
+          });
+        }
+      }
+      if (endTime <= startTime) throw new Error('The video timestamp did not advance beyond the last processed timestamp.');
       if (signal.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
 
+      stageStartedAt = perfNow();
       const sliceRes = await sendBridgeMessage('GET_TRANSCRIPT_SLICE', { startTime, endTime });
+      report.stages.transcriptExtractionMs = elapsedMs(stageStartedAt);
       if (!sliceRes || !sliceRes.success) throw new Error(sliceRes?.error || 'Transcript extraction failed.');
       if (!sliceRes.lines || sliceRes.lines.length === 0 || !sliceRes.transcriptText?.trim()) {
         const details = sliceRes?.diagnostic ? ` Details: ${sliceRes.diagnostic}` : '';
@@ -588,7 +815,20 @@ tags: [hovernotes, gate-cs, study-notes]
       const CHUNK_SIZE = 300;
       const fullLines = sliceRes.lines;
       const segmentCount = Math.max(1, Math.ceil((endTime - startTime) / CHUNK_SIZE));
-      let generatedChars = 0;
+      report.interval = `${formatTime(startTime)}–${formatTime(endTime)}`;
+      report.endTime = endTime;
+      report.segmentCount = segmentCount;
+      report.transcriptLines = fullLines.length;
+      report.transcriptCharacters = sliceRes.transcriptText.length;
+      report.caption = sliceRes.performance || null;
+      if (sliceRes.performance) {
+        report.stages.captionLoadMs = sliceRes.performance.totalLoadMs ?? null;
+        report.stages.captionTrackDiscoveryMs = sliceRes.performance.trackDiscoveryMs ?? null;
+        report.stages.captionPlayerWaitMs = sliceRes.performance.playerWaitMs ?? null;
+        report.stages.captionParseMs = sliceRes.performance.captionParseMs ?? null;
+        report.stages.transcriptSliceFilterMs = sliceRes.performance.sliceFilterMs ?? null;
+      }
+      report.stages.geminiMs = 0;
       didAppend = true; // Streamed AI text mutates the editor; rollback on any failure.
 
       for (let seg = 0; seg < segmentCount; seg++) {
@@ -608,44 +848,78 @@ tags: [hovernotes, gate-cs, study-notes]
 
         elements.aiStatusText.textContent = `Generating segment ${seg + 1}/${segmentCount} (${formatTime(segStart)}–${formatTime(segEnd)})…`;
         const priorNotes = elements.noteEditor.value.slice(-12000);
-        const generated = await window.geminiClient.generateNotesStream({
-          videoTitle: title,
-          currentTimestamp: `${formatTime(segStart)}–${formatTime(segEnd)}`,
-          transcriptChunk: segLines.join('\n'),
-          // The only captured still belongs to the latest segment, not earlier segments.
-          frameBase64: seg === segmentCount - 1 ? frameData.dataUrl : null,
-          modeLabel: 'Transcript-grounded lecture notes',
-          existingNotes: priorNotes,
-          signal,
-          onChunk: (chunkText) => appendTextToEnd(chunkText),
-          onComplete: () => appendTextToEnd('\n\n')
-        });
-        if (generated && generated.trim()) generatedChars += generated.length;
+        const geminiStartedAt = perfNow();
+        let generated = '';
+        try {
+          generated = await window.geminiClient.generateNotesStream({
+            videoTitle: title,
+            currentTimestamp: `${formatTime(segStart)}–${formatTime(segEnd)}`,
+            transcriptChunk: segLines.join('\n'),
+            // The only captured still belongs to the latest segment, not earlier segments.
+            frameBase64: seg === segmentCount - 1 && includeCapturedFrame ? frameData.dataUrl : null,
+            modeLabel: 'Transcript-grounded lecture notes',
+            existingNotes: priorNotes,
+            signal,
+            onDiagnostics: (event) => {
+              report.geminiAttempts.push(event);
+              console.info('[HoverNotes Performance] Gemini attempt', {
+                videoId: videoIdAtStart,
+                interval: `${formatTime(segStart)}–${formatTime(segEnd)}`,
+                ...event
+              });
+            },
+            onChunk: (chunkText) => appendTextToEnd(chunkText),
+            onComplete: () => appendTextToEnd('\n\n')
+          });
+        } finally {
+          report.stages.geminiMs += elapsedMs(geminiStartedAt);
+        }
+        if (generated && generated.trim()) {
+          report.generatedCharacters += generated.length;
+        }
       }
 
       if (signal.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
-      if (generatedChars === 0) throw new Error('The AI returned no note content. Progress was not advanced.');
+      if (report.generatedCharacters === 0) throw new Error('The AI returned no note content. Progress was not advanced.');
       if (videoIdAtStart !== state.currentVideoId) throw new DOMException('Video changed.', 'AbortError');
 
       // Persist the visual asset and its Obsidian link only after AI text completed.
-      await persistCapturedFrame(title, frameData, videoUrl);
+      if (includeCapturedFrame) {
+        stageStartedAt = perfNow();
+        await persistCapturedFrame(title, frameData, videoUrl);
+        report.stages.framePersistenceMs = elapsedMs(stageStartedAt);
+      } else {
+        report.stages.framePersistenceMs = 0;
+      }
       if (signal.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
 
+      stageStartedAt = perfNow();
+      flushMarkdownPreviewRender();
+      report.stages.finalPreviewRenderMs = elapsedMs(stageStartedAt);
+
       state.lastProcessedTime = endTime;
+      stageStartedAt = perfNow();
       const saved = await saveCurrentNote();
+      report.stages.noteSaveMs = elapsedMs(stageStartedAt);
       if (!saved) throw new Error('The note could not be saved. Progress was not committed.');
+      report.outcome = 'saved';
       showSaveStatus(`Saved lecture notes through ${formatTime(endTime)}`);
       return true;
     } catch (err) {
+      report.errorName = err.name || 'Error';
       if (videoIdAtStart === state.currentVideoId && didAppend) {
         elements.noteEditor.value = originalContent;
-        renderMarkdownPreview();
+        flushMarkdownPreviewRender();
         state.lastProcessedTime = startTime;
+        const rollbackStartedAt = perfNow();
         await saveCurrentNote();
+        report.stages.rollbackSaveMs = elapsedMs(rollbackStartedAt);
       }
       if (err.name === 'AbortError') {
+        report.outcome = 'aborted';
         console.info('[HoverNotes AI] Current generation cancelled:', err.message);
       } else {
+        report.outcome = 'failed';
         console.error('[HoverNotes AI] Synthesis error:', err);
         showSaveStatus('AI Error: ' + err.message, true);
         // The red AI banner is intentionally compact; retain the complete error on hover.
@@ -663,20 +937,70 @@ tags: [hovernotes, gate-cs, study-notes]
       }
       return false;
     } finally {
+      report.totalMs = elapsedMs(startedAt);
+      report.preview = {
+        renderCount: state.previewRenderMetrics.count - previewStart.count,
+        cumulativeRenderMs: Math.round((state.previewRenderMetrics.totalDurationMs - previewStart.totalDurationMs) * 100) / 100,
+        averageRenderMs: (state.previewRenderMetrics.count - previewStart.count) > 0
+          ? Math.round(((state.previewRenderMetrics.totalDurationMs - previewStart.totalDurationMs) /
+            (state.previewRenderMetrics.count - previewStart.count)) * 100) / 100
+          : 0
+      };
+      if (state.aiRunMetrics && state.aiRunMetrics.videoId === videoIdAtStart) {
+        state.aiRunMetrics.generations.push(report);
+      }
+      logPerformance('Generation segment completed', {
+        videoId: report.videoId,
+        interval: report.interval,
+        outcome: report.outcome,
+        totalMs: report.totalMs,
+        stages: report.stages,
+        transcriptLines: report.transcriptLines,
+        transcriptCharacters: report.transcriptCharacters,
+        caption: report.caption,
+        frameQuality: report.frameQuality || null,
+        screenshotSkipped: report.screenshotSkipped || null,
+        generatedCharacters: report.generatedCharacters,
+        segmentCount: report.segmentCount,
+        preview: report.preview,
+        geminiAttemptCount: report.geminiAttempts.filter(event => event.type === 'attempt-start').length
+      });
+
+      state.lastGenerationOutcome = report.outcome;
       state.isGeneratingAI = false;
       state.activeGenerationController = null;
       if (settleGeneration) settleGeneration();
       state.generationSettled = null;
-      elements.aiLoadingSpinner.classList.add('hidden');
-      if (state.isAutoNotesActive) {
-        elements.aiStatusText.textContent = 'AI is watching lecture…';
-      } else {
-        elements.aiStatusIndicator.classList.add('hidden');
-      }
 
-      if (state.flushAfterCurrentGeneration && !signal.aborted && videoIdAtStart === state.currentVideoId) {
+      const shouldFlushTail = state.flushAfterCurrentGeneration &&
+        state.stopBoundaryReady &&
+        !signal.aborted &&
+        videoIdAtStart === state.currentVideoId &&
+        (report.outcome === 'saved' || report.outcome === 'no-new-interval');
+      if (shouldFlushTail) {
         state.flushAfterCurrentGeneration = false;
-        setTimeout(() => triggerAutoNotesSynthesis({ force: true }), 0);
+        const frozenStopAt = state.stopRequestedAt;
+        const label = Number.isFinite(frozenStopAt) ? formatTime(frozenStopAt) : 'the paused position';
+        setFinalizingUI(true, `Generating remaining notes through ${label}…`);
+        setTimeout(() => {
+          void triggerAutoNotesSynthesis({
+            force: true,
+            endTimeLimit: frozenStopAt,
+            isFinalFlush: true
+          });
+        }, 0);
+      } else if (state.isFinalizing && !state.stopBoundaryReady && !state.isAutoNotesActive && !signal.aborted) {
+        // The Stop handler is still awaiting the exact player timestamp. Keep the
+        // finishing indicator alive; that handler will schedule the bounded flush.
+      } else if (isFinalFlush || (state.isFinalizing && !state.isAutoNotesActive && !signal.aborted)) {
+        finishAutoNotesSession(state.stopRequestedAt);
+      } else {
+        elements.aiLoadingSpinner.classList.add('hidden');
+        if (state.isAutoNotesActive) {
+          elements.aiStatusText.textContent = 'AI is watching lecture…';
+        } else {
+          elements.aiStatusIndicator.classList.add('hidden');
+        }
       }
     }
   }
@@ -698,6 +1022,24 @@ tags: [hovernotes, gate-cs, study-notes]
     return str.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   }
 
+  function scheduleMarkdownPreviewRender() {
+    if (state.previewRenderTimer) return;
+    state.previewRenderTimer = setTimeout(() => {
+      state.previewRenderTimer = null;
+      elements.noteEditor.scrollTop = elements.noteEditor.scrollHeight;
+      renderMarkdownPreview();
+    }, 150);
+  }
+
+  function flushMarkdownPreviewRender() {
+    if (state.previewRenderTimer) {
+      clearTimeout(state.previewRenderTimer);
+      state.previewRenderTimer = null;
+    }
+    elements.noteEditor.scrollTop = elements.noteEditor.scrollHeight;
+    renderMarkdownPreview();
+  }
+
   function formatInline(text) {
     return text
       .replace(/\*\*\*(.*?)\*\*\*/g, '<b><i>$1</i></b>')
@@ -708,25 +1050,37 @@ tags: [hovernotes, gate-cs, study-notes]
   }
 
   function renderMarkdownPreview() {
-    const raw = elements.noteEditor.value;
-    if (!raw.trim()) {
-      elements.notePreview.innerHTML = '<p class="preview-placeholder">Exhaustive study notes, LaTeX formulas, and slide snapshots will render here in real time...</p>';
-      return;
+    if (state.previewRenderTimer) {
+      clearTimeout(state.previewRenderTimer);
+      state.previewRenderTimer = null;
     }
+    const renderStartedAt = perfNow();
+    const raw = elements.noteEditor.value;
+    try {
+      if (!raw.trim()) {
+        elements.notePreview.innerHTML = '<p class="preview-placeholder">Exhaustive study notes, LaTeX formulas, and slide snapshots will render here in real time...</p>';
+        return;
+      }
 
-    let parsedHtml = parseMarkdownToHtml(raw);
-    elements.notePreview.innerHTML = parsedHtml;
+      let parsedHtml = parseMarkdownToHtml(raw);
+      elements.notePreview.innerHTML = parsedHtml;
 
-    // Attach click listeners to all timestamp links to seek video
-    elements.notePreview.querySelectorAll('.timestamp-link').forEach((link) => {
-      link.addEventListener('click', (e) => {
-        e.preventDefault();
-        const seconds = parseFloat(link.dataset.seconds);
-        if (!isNaN(seconds)) {
-          sendBridgeMessage('CONTROL_PLAYBACK', { type: 'seek', time: seconds });
-        }
+      // Attach click listeners to all timestamp links to seek video
+      elements.notePreview.querySelectorAll('.timestamp-link').forEach((link) => {
+        link.addEventListener('click', (e) => {
+          e.preventDefault();
+          const seconds = parseFloat(link.dataset.seconds);
+          if (!isNaN(seconds)) {
+            sendBridgeMessage('CONTROL_PLAYBACK', { type: 'seek', time: seconds });
+          }
+        });
       });
-    });
+    } finally {
+      const duration = Math.max(0, perfNow() - renderStartedAt);
+      state.previewRenderMetrics.count++;
+      state.previewRenderMetrics.totalDurationMs += duration;
+      state.previewRenderMetrics.maxDurationMs = Math.max(state.previewRenderMetrics.maxDurationMs, duration);
+    }
   }
 
   function parseMarkdownToHtml(md) {
@@ -1095,7 +1449,9 @@ tags: [hovernotes, gate-cs, study-notes]
     elements.btnCapture.addEventListener('click', handleManualCapture);
     elements.btnTimestamp.addEventListener('click', handleInsertTimestamp);
     elements.quickTimestampTool.addEventListener('click', handleInsertTimestamp);
-    elements.btnAiNotes.addEventListener('click', () => toggleAutoNotes());
+    elements.btnAiNotes.addEventListener('click', () => {
+      void handleAutoNotesButtonClick();
+    });
 
     // Toolbar buttons
     document.querySelectorAll('.tool-btn').forEach(btn => {

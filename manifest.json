@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "HoverNotes Clone",
-  "version": "1.0.8",
-  "description": "Transcript-grounded YouTube notes using the player-issued caption response, with local Obsidian saving.",
+  "version": "1.0.10",
+  "description": "Transcript-grounded YouTube notes with performance diagnostics and local Obsidian saving.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",
@@ -47,6 +47,7 @@
       ],
       "js": [
         "content/caption-parser.js",
+        "content/frame-quality.js",
         "content/content.js"
       ],
       "css": [

@@ -18,11 +18,11 @@ assert(mainSource.includes('response.clone()'), 'fetch observer must not consume
 assert(mainSource.includes("player.setOption('captions', 'track', match)"), 'must activate captions through YouTube player API');
 assert(!mainSource.includes('pot='), 'PO token values must never be synthesized or embedded in source');
 assert(manifest.content_scripts.some(entry => entry.world === 'MAIN' && entry.run_at === 'document_start' && entry.js.includes('content/youtube-main.js')), 'MAIN observer must be a static document_start content script');
-assert(manifest.version === '1.0.8', 'manifest version must match this build');
+assert(manifest.version === '1.0.10', 'manifest version must match this build');
 assert(manifest.minimum_chrome_version === '111', 'MAIN world manifest content scripts require Chrome 111+');
 
 const ui = fs.readFileSync(path.join(base, 'sidebar', 'sidebar.html'), 'utf8');
-assert(ui.includes('v1.0.8'), 'visible UI version must match manifest');
+assert(ui.includes('v1.0.10'), 'visible UI version must match manifest');
 assert(mainSource.includes('CAPTION_BODY_START') && mainSource.includes('CAPTION_BODY_CHUNK'), 'large player caption bodies must use chunked transfer');
 assert(source.includes('CAPTION_BODY_START') && source.includes('CAPTION_BODY_CHUNK'), 'isolated script must reassemble chunked caption bodies');
-console.log('PASS: v1.0.8 static MAIN-world observer, chunked large-body relay and no token-less caption refetch.');
+console.log('PASS: v1.0.10 static MAIN-world observer, chunked large-body relay and no token-less caption refetch.');

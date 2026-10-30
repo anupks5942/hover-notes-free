@@ -45,3 +45,26 @@ This test does not prove full HoverNotes parity, direct audio understanding, cap
 6. Only after all of the above succeeds, run the 2-minute smoke test. If it fails, export the exact console lines and full red-banner tooltip; do not run the 15-minute benchmark.
 
 This observer uses undocumented YouTube player APIs and may need adjustment when YouTube changes its player. The automated tests mock browser responses; they do not prove live YouTube caption behavior.
+
+## v1.0.10 performance, model fallback and study-frame acceptance checks
+
+1. Use the same unpacked extension directory; reload the extension and refresh the YouTube tab. Do not disconnect or reconnect the existing vault.
+2. Start the benchmark video at 00:00 and 2.0x. Start AI Notes, then pause the video at the chosen test boundary before pressing Stop.
+3. Confirm the button changes to `Finishing…`, remains disabled with the spinner visible, and does not return to `AI Notes` until the final interval has either saved or failed visibly.
+4. Confirm an in-flight generation finishing during the asynchronous Stop-position query does not close the run early; the final note must not contain timestamps later than the captured Stop boundary. If the frame capture occurs after the boundary, the out-of-range frame must be omitted instead of being assigned the earlier timestamp.
+5. In DevTools Console, filter for `[HoverNotes Performance]` and collect `Caption transcript load finished`, `Gemini attempt`, `Generation segment completed`, and `AI Notes run completed` records.
+6. Confirm diagnostics include caption load/cache, parse and slice timings; Gemini provider/model/key-slot attempt, HTTP status, first-token and stream timing; screenshot, preview and note-save timings; and final run wall time.
+7. Confirm no API key, prompt text, transcript text, caption body, or image data appears in the performance records.
+8. Compare the measured timings before changing model selection, AI prompts, or the 300-second generation segment size. A successful automated test is not a substitute for this live performance run.
+
+
+## v1.0.10 short live smoke test (required before 30-minute benchmark)
+
+1. Reload v1.0.10 from the same unpacked extension folder and refresh the YouTube tab. Keep the existing MyVault connection.
+2. Start the same lecture at 00:00 and 2.0x. Run to 04:00, pause first, then click Stop. Wait until the button returns to `AI Notes` and the spinner disappears.
+3. In the single YouTube tab DevTools Console, collect `[HoverNotes Performance]`, `[HoverNotes Frames]`, `[HoverNotes AI]` and `[HoverNotes Captions]` records. No second DevTools console is required when all these prefixes appear in the same console.
+4. Confirm a slow primary Gemini attempt logs `first-token-timeout` after approximately 30 seconds and proceeds to the fallback model; confirm the fallback request does not contain `thinkingConfig`. A fast primary response should not trigger the timeout.
+5. Confirm a talking-head-only interval logs `selected: false` and does not create an automatic screenshot embed. Confirm an interval with a slide-like frame can select and embed the best candidate with its actual sampled timestamp.
+6. Confirm screenshots are not captured by seeking or pausing the video; only the user-operated pause before Stop should change playback state.
+7. Confirm instructor guarantees/opinions in the generated Markdown are attributed to the instructor. Check the exported Markdown links and image files in the vault.
+8. Only after this smoke test succeeds should the 30-minute benchmark resume.

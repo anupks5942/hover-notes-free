@@ -1,7 +1,7 @@
 /**
  * HoverNotes Clone - Production Multi-Key Gemini AI Streamer
- * Locks to gemini-3.8-flash (fallback gemini-3.5-flash-lite) with zero thinking budget,
- * live SSE token streaming, and GATE-grade academic lecture synthesis.
+ * Uses a bounded first-token wait, model-aware generation configuration,
+ * live SSE token streaming, and transcript-grounded academic lecture synthesis.
  */
 
 class GeminiAIClient {
@@ -14,6 +14,10 @@ class GeminiAIClient {
     this.customEndpointUrl = '';
     this.customApiKey = '';
     this.customModel = 'gpt-4o-mini';
+    // Time allowed for a Gemini request to produce its first text token. The
+    // timer stops at the first token; it does not cap a valid response stream.
+    this.firstTokenTimeoutMs = 30000;
+    this.sessionPreferredModel = null;
 
     // Evidence-first prompt: never prescribe subject-specific concepts or examples.
     // The transcript is the source of truth; the frame is supporting visual evidence.
@@ -26,7 +30,7 @@ NON-NEGOTIABLE GROUNDING RULES:
 4. Translate Hindi/Hinglish into precise technical English while preserving the instructor's meaning, caveats, emphasis, and examples. Omit greetings, promotions, and unrelated banter; retain meaningful analogies.
 5. Cover the technical information in this segment without padding. Do not expand a brief mention into a full textbook explanation. Do not include a subject-specific formula unless it appears in the supplied evidence.
 6. Preserve important notation and equations. Use LaTeX only when the expression is present or unambiguously derivable from the supplied evidence. Do not fabricate complexity bounds.
-7. Clearly distinguish instructor material from uncertain extraction. Do not add practice questions or supplementary teaching unless explicitly requested.
+7. Clearly distinguish instructor material from uncertain extraction. Attribute the instructor's promises, guarantees, opinions, and personal claims explicitly (for example, ‘The instructor claims…’); do not present them as independently verified facts. Do not add practice questions or supplementary teaching unless explicitly requested.
 8. Use the timestamp range in the user message. Add concise timestamp anchors to major concepts when the transcript provides them.
 9. The previous-notes context is only to avoid repetition. Do not rewrite it. Add genuinely new information, or briefly clarify a previous point only when this segment explicitly develops it.
 10. Output only the new Markdown section(s). Do not reproduce YAML frontmatter or the document title. If the segment contains no new technical content, output: <!-- No new technical content in this segment. -->`;
@@ -65,6 +69,7 @@ NON-NEGOTIABLE GROUNDING RULES:
     this.geminiKeys = keys || this.geminiKeys;
     this.activeKeyIndex = typeof activeIndex === 'number' ? activeIndex : this.activeKeyIndex;
     this.activeModel = model || this.primaryModel;
+    this.sessionPreferredModel = null;
     this.customEndpointUrl = customUrl !== undefined ? customUrl.trim() : this.customEndpointUrl;
     this.customApiKey = customKey !== undefined ? customKey.trim() : this.customApiKey;
     this.customModel = customModel || this.customModel;
@@ -143,32 +148,34 @@ NON-NEGOTIABLE GROUNDING RULES:
       }
 
       this.activeModel = testModel;
+      this.sessionPreferredModel = null;
       await chrome.storage.local.set({ gemini_model: testModel });
 
-      // 2. Perform ping generation with zero thinking delay
+      // 2. Perform a model-compatible ping. The configured primary supports
+      // thinkingConfig; the selected fallback model is sent without that option.
       const genUrl = `https://generativelanguage.googleapis.com/v1beta/models/${testModel}:generateContent`;
+      const pingPayload = {
+        contents: [{ parts: [{ text: 'Ping test. Respond with: OK' }] }],
+        generationConfig: {
+          temperature: 0.2,
+          maxOutputTokens: 10,
+          ...(testModel === this.primaryModel ? { thinkingConfig: { thinkingBudget: 0 } } : {})
+        }
+      };
       let genRes = await fetch(genUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: 'Ping test. Respond with: OK' }] }],
-          generationConfig: {
-            temperature: 0.2,
-            maxOutputTokens: 10,
-            thinkingConfig: { thinkingBudget: 0 }
-          }
-        })
+        body: JSON.stringify(pingPayload)
       });
 
-      // If 400 on thinkingConfig, retry without it
-      if (genRes.status === 400) {
+      // Keep a compatibility retry only when the primary rejected thinkingConfig.
+      if (genRes.status === 400 && pingPayload.generationConfig.thinkingConfig) {
+        const retryPayload = { ...pingPayload };
+        retryPayload.generationConfig = { temperature: 0.2, maxOutputTokens: 10 };
         genRes = await fetch(genUrl, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json', 'x-goog-api-key': key },
-          body: JSON.stringify({
-            contents: [{ parts: [{ text: 'Ping test. Respond with: OK' }] }],
-            generationConfig: { temperature: 0.2, maxOutputTokens: 10 }
-          })
+          body: JSON.stringify(retryPayload)
         });
       }
 
@@ -220,10 +227,24 @@ NON-NEGOTIABLE GROUNDING RULES:
     onChunk,
     onComplete,
     onError,
+    onDiagnostics,
     existingNotes = '',
     signal
   }) {
+    const configStartedAt = performance.now();
     await this.initConfig();
+    const configLoadMs = Math.round(performance.now() - configStartedAt);
+    this.emitDiagnostics(onDiagnostics, {
+      type: 'config-ready',
+      configLoadMs,
+      configuredGeminiKeySlots: this.getAvailableGeminiKeys().map(item => item.index + 1),
+      primaryModel: this.primaryModel,
+      fallbackModel: this.fallbackModel,
+      activeModel: this.sessionPreferredModel || this.activeModel || this.primaryModel,
+      sessionFallbackActive: Boolean(this.sessionPreferredModel),
+      firstTokenTimeoutMs: this.firstTokenTimeoutMs,
+      customEndpointConfigured: Boolean(this.customEndpointUrl)
+    });
 
     const available = this.getAvailableGeminiKeys();
     if (available.length === 0 && !this.customEndpointUrl) {
@@ -251,12 +272,14 @@ ${priorContext || '[No earlier notes in this run.]'}
 
 Create the new notes for this timestamp range only. Ground every factual statement in the transcript or visibly legible frame. Preserve the instructor's examples and numbers exactly. Never add generic GATE/DSA material to fill space. Do not label an AI-generated example as an instructor example. If there is insufficient evidence, write less rather than guess.`;
 
-    const modelsToTry = [this.activeModel || this.primaryModel, this.primaryModel, this.fallbackModel]
+    const preferredModel = this.sessionPreferredModel || this.activeModel || this.primaryModel;
+    const modelsToTry = [preferredModel, this.primaryModel, this.fallbackModel]
       .filter((m, i, arr) => m && arr.indexOf(m) === i);
 
     let lastError = null;
     let attempts = 0;
     const maxKeyAttempts = Math.max(available.length, 1);
+    let modelAttemptNumber = 0;
 
     while (attempts < maxKeyAttempts && available.length > 0) {
       const activeObj = available.find(k => k.index === this.activeKeyIndex) || available[0];
@@ -264,18 +287,58 @@ Create the new notes for this timestamp range only. Ground every factual stateme
       attempts++;
 
       for (const model of modelsToTry) {
+        modelAttemptNumber++;
+        const attemptStartedAt = performance.now();
+        this.emitDiagnostics(onDiagnostics, {
+          type: 'attempt-start',
+          provider: 'gemini',
+          model,
+          keySlot: activeObj.index + 1,
+          keyAttempt: attempts,
+          modelAttempt: modelAttemptNumber,
+          firstTokenTimeoutMs: this.firstTokenTimeoutMs
+        });
         try {
-          return await this.streamGeminiSSE({
+          const generated = await this.streamGeminiSSE({
             apiKey: activeKey,
             model,
             promptText: userPrompt,
             frameBase64,
             onChunk,
             onComplete,
-            signal
+            signal,
+            onDiagnostics
           });
+          // Once a fallback proves healthy, keep using it for the rest of this
+          // extension session instead of paying the first-token timeout on every
+          // subsequent interval. Saving model settings or reloading resets this.
+          this.sessionPreferredModel = model !== this.primaryModel ? model : null;
+          this.emitDiagnostics(onDiagnostics, {
+            type: 'attempt-success',
+            provider: 'gemini',
+            model,
+            keySlot: activeObj.index + 1,
+            keyAttempt: attempts,
+            modelAttempt: modelAttemptNumber,
+            durationMs: Math.round(performance.now() - attemptStartedAt),
+            generatedCharacters: generated.length
+          });
+          return generated;
         } catch (err) {
           lastError = err;
+          this.emitDiagnostics(onDiagnostics, {
+            type: 'attempt-failed',
+            provider: 'gemini',
+            model,
+            keySlot: activeObj.index + 1,
+            keyAttempt: attempts,
+            modelAttempt: modelAttemptNumber,
+            durationMs: Math.round(performance.now() - attemptStartedAt),
+            httpStatus: Number.isFinite(err.status) ? err.status : null,
+            errorName: err.name || 'Error',
+            timeoutMs: Number.isFinite(err.timeoutMs) ? err.timeoutMs : null,
+            aborted: err.name === 'AbortError' || Boolean(signal?.aborted)
+          });
           console.warn(`[HoverNotes AI] Model ${model} on Key #${activeObj.index + 1} error:`, err.message);
 
           // If rate limit (429) or quota exceeded (403), break model loop to rotate key
@@ -296,17 +359,43 @@ Create the new notes for this timestamp range only. Ground every factual stateme
 
     // Fallback: Custom OpenAI-compatible endpoint
     if (this.customEndpointUrl) {
+      const customStartedAt = performance.now();
+      this.emitDiagnostics(onDiagnostics, {
+        type: 'attempt-start',
+        provider: 'openai-compatible',
+        model: this.customModel || 'gpt-4o-mini',
+        keySlot: this.customApiKey ? 'custom-key-configured' : 'no-key-configured',
+        modelAttempt: modelAttemptNumber + 1
+      });
       try {
         console.warn('[HoverNotes AI] Falling back to custom OpenAI-compatible endpoint...');
-        return await this.streamOpenAIExtension({
+        const generated = await this.streamOpenAIExtension({
           promptText: userPrompt,
           frameBase64,
           onChunk,
           onComplete,
-          signal
+          signal,
+          onDiagnostics
         });
+        this.emitDiagnostics(onDiagnostics, {
+          type: 'attempt-success',
+          provider: 'openai-compatible',
+          model: this.customModel || 'gpt-4o-mini',
+          durationMs: Math.round(performance.now() - customStartedAt),
+          generatedCharacters: generated.length
+        });
+        return generated;
       } catch (customErr) {
         lastError = customErr;
+        this.emitDiagnostics(onDiagnostics, {
+          type: 'attempt-failed',
+          provider: 'openai-compatible',
+          model: this.customModel || 'gpt-4o-mini',
+          durationMs: Math.round(performance.now() - customStartedAt),
+          httpStatus: Number.isFinite(customErr.status) ? customErr.status : null,
+          errorName: customErr.name || 'Error',
+          aborted: customErr.name === 'AbortError' || Boolean(signal?.aborted)
+        });
       }
     }
 
@@ -315,8 +404,22 @@ Create the new notes for this timestamp range only. Ground every factual stateme
     throw finalError;
   }
 
+  emitDiagnostics(callback, event) {
+    if (typeof callback !== 'function') return;
+    try {
+      callback({
+        ...event,
+        at: new Date().toISOString()
+      });
+    } catch (err) {
+      // Diagnostics must never interfere with note generation.
+      console.warn('[HoverNotes AI] Diagnostics callback failed:', err?.message || err);
+    }
+  }
+
   // Internal SSE Stream Implementation
-  async streamGeminiSSE({ apiKey, model, promptText, frameBase64, onChunk, onComplete, signal }) {
+  async streamGeminiSSE({ apiKey, model, promptText, frameBase64, onChunk, onComplete, onDiagnostics, signal }) {
+    const requestStartedAt = performance.now();
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
 
     const parts = [{ text: promptText }];
@@ -339,32 +442,75 @@ Create the new notes for this timestamp range only. Ground every factual stateme
       generationConfig: {
         temperature: 0.2,
         maxOutputTokens: 8192,
-        thinkingConfig: {
-          thinkingBudget: 0
-        }
+        ...(model === this.primaryModel ? { thinkingConfig: { thinkingBudget: 0 } } : {})
       }
     };
 
+    // A request-local controller lets a slow first response fall through to the
+    // fallback model without cancelling the complete AI Notes run.
+    const requestController = new AbortController();
+    let firstTokenTimedOut = false;
+    const timeoutMs = Math.max(1000, Number(this.firstTokenTimeoutMs) || 30000);
+    const relayParentAbort = () => requestController.abort();
+    if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
+    signal?.addEventListener('abort', relayParentAbort, { once: true });
+    const timeoutId = setTimeout(() => {
+      firstTokenTimedOut = true;
+      requestController.abort();
+    }, timeoutMs);
+    const clearFirstTokenTimeout = () => clearTimeout(timeoutId);
+    const normalizeRequestError = (error) => {
+      if (firstTokenTimedOut) {
+        const timeoutError = new Error(`Gemini did not produce its first text token within ${timeoutMs} ms.`);
+        timeoutError.name = 'FirstTokenTimeoutError';
+        timeoutError.code = 'FIRST_TOKEN_TIMEOUT';
+        timeoutError.timeoutMs = timeoutMs;
+        return timeoutError;
+      }
+      if (signal?.aborted) return new DOMException('Generation cancelled.', 'AbortError');
+      return error;
+    };
+
+    try {
     let response = await fetch(endpoint, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
       body: JSON.stringify(payload),
-      signal
+      signal: requestController.signal
     });
+    let responseHeadersMs = Math.round(performance.now() - requestStartedAt);
 
     // If 400 due to thinkingConfig unsupported on a fallback model, retry once without thinkingConfig
-    if (response.status === 400) {
+    if (response.status === 400 && payload.generationConfig.thinkingConfig) {
+      this.emitDiagnostics(onDiagnostics, {
+        type: 'request-retry',
+        provider: 'gemini',
+        model,
+        reason: 'thinking-config-unsupported',
+        firstHttpStatus: 400,
+        elapsedMs: Math.round(performance.now() - requestStartedAt)
+      });
       const retryPayload = { ...payload };
       retryPayload.generationConfig = { temperature: 0.2, maxOutputTokens: 8192 };
       response = await fetch(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'x-goog-api-key': apiKey },
         body: JSON.stringify(retryPayload),
-        signal
+        signal: requestController.signal
       });
+      responseHeadersMs = Math.round(performance.now() - requestStartedAt);
     }
 
+    this.emitDiagnostics(onDiagnostics, {
+      type: 'http-response',
+      provider: 'gemini',
+      model,
+      httpStatus: response.status,
+      responseHeadersMs
+    });
+
     if (!response.ok) {
+      clearFirstTokenTimeout();
       let errorMsg = `HTTP ${response.status}: ${response.statusText}`;
       try {
         const errJson = await response.json();
@@ -379,13 +525,20 @@ Create the new notes for this timestamp range only. Ground every factual stateme
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
     let accumulatedText = '';
+    let firstTokenMs = null;
 
     while (true) {
       if (signal?.aborted) {
         try { await reader.cancel(); } catch (e) {}
         throw new DOMException('Generation cancelled.', 'AbortError');
       }
-      const { value, done } = await reader.read();
+      let readResult;
+      try {
+        readResult = await reader.read();
+      } catch (readError) {
+        throw normalizeRequestError(readError);
+      }
+      const { value, done } = readResult;
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
@@ -401,6 +554,16 @@ Create the new notes for this timestamp range only. Ground every factual stateme
             const parsed = JSON.parse(jsonStr);
             const deltaText = (parsed.candidates?.[0]?.content?.parts || []).map(part => part.text || '').join('');
             if (deltaText) {
+              if (firstTokenMs === null) {
+                clearFirstTokenTimeout();
+                firstTokenMs = Math.round(performance.now() - requestStartedAt);
+                this.emitDiagnostics(onDiagnostics, {
+                  type: 'first-token',
+                  provider: 'gemini',
+                  model,
+                  firstTokenMs
+                });
+              }
               accumulatedText += deltaText;
               if (onChunk) onChunk(deltaText, accumulatedText);
             }
@@ -416,18 +579,53 @@ Create the new notes for this timestamp range only. Ground every factual stateme
           const parsed = JSON.parse(jsonStr);
           const tailText = (parsed.candidates?.[0]?.content?.parts || []).map(part => part.text || '').join('');
           if (tailText) {
+            if (firstTokenMs === null) {
+              clearFirstTokenTimeout();
+              firstTokenMs = Math.round(performance.now() - requestStartedAt);
+              this.emitDiagnostics(onDiagnostics, {
+                type: 'first-token',
+                provider: 'gemini',
+                model,
+                firstTokenMs
+              });
+            }
             accumulatedText += tailText;
             if (onChunk) onChunk(tailText, accumulatedText);
           }
         } catch (e) { console.warn('[HoverNotes AI] Ignored incomplete final SSE event.'); }
       }
     }
+    clearFirstTokenTimeout();
+    this.emitDiagnostics(onDiagnostics, {
+      type: 'stream-complete',
+      provider: 'gemini',
+      model,
+      httpStatus: response.status,
+      responseHeadersMs,
+      firstTokenMs,
+      totalRequestMs: Math.round(performance.now() - requestStartedAt),
+      generatedCharacters: accumulatedText.length
+    });
     if (onComplete) onComplete(accumulatedText);
     return accumulatedText;
+    } catch (error) {
+      const normalized = normalizeRequestError(error);
+      if (normalized.name === 'FirstTokenTimeoutError') {
+        this.emitDiagnostics(onDiagnostics, {
+          type: 'first-token-timeout', provider: 'gemini', model, timeoutMs,
+          elapsedMs: Math.round(performance.now() - requestStartedAt)
+        });
+      }
+      throw normalized;
+    } finally {
+      clearFirstTokenTimeout();
+      signal?.removeEventListener('abort', relayParentAbort);
+    }
   }
 
   // Internal Custom OpenAI-compatible Fallback Stream
-  async streamOpenAIExtension({ promptText, frameBase64, onChunk, onComplete, signal }) {
+  async streamOpenAIExtension({ promptText, frameBase64, onChunk, onComplete, onDiagnostics, signal }) {
+    const requestStartedAt = performance.now();
     let endpoint = this.customEndpointUrl.replace(/\/+$/, '');
     if (!endpoint.endsWith('/chat/completions')) endpoint += '/chat/completions';
 
@@ -458,6 +656,15 @@ Create the new notes for this timestamp range only. Ground every factual stateme
       signal
     });
 
+    const responseHeadersMs = Math.round(performance.now() - requestStartedAt);
+    this.emitDiagnostics(onDiagnostics, {
+      type: 'http-response',
+      provider: 'openai-compatible',
+      model: this.customModel || 'gpt-4o-mini',
+      httpStatus: response.status,
+      responseHeadersMs
+    });
+
     if (!response.ok) {
       const err = new Error(`Custom endpoint HTTP ${response.status}: ${response.statusText}`);
       err.status = response.status;
@@ -468,13 +675,20 @@ Create the new notes for this timestamp range only. Ground every factual stateme
     const decoder = new TextDecoder('utf-8');
     let buffer = '';
     let accumulatedText = '';
+    let firstTokenMs = null;
 
     while (true) {
       if (signal?.aborted) {
         try { await reader.cancel(); } catch (e) {}
         throw new DOMException('Generation cancelled.', 'AbortError');
       }
-      const { value, done } = await reader.read();
+      let readResult;
+      try {
+        readResult = await reader.read();
+      } catch (readError) {
+        throw normalizeRequestError(readError);
+      }
+      const { value, done } = readResult;
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
@@ -491,6 +705,16 @@ Create the new notes for this timestamp range only. Ground every factual stateme
             const delta = parsed.choices?.[0]?.delta?.content || '';
             const deltaText = typeof delta === 'string' ? delta : (Array.isArray(delta) ? delta.map(part => part.text || '').join('') : '');
             if (deltaText) {
+              if (firstTokenMs === null) {
+                clearFirstTokenTimeout();
+                firstTokenMs = Math.round(performance.now() - requestStartedAt);
+                this.emitDiagnostics(onDiagnostics, {
+                  type: 'first-token',
+                  provider: 'openai-compatible',
+                  model: this.customModel || 'gpt-4o-mini',
+                  firstTokenMs
+                });
+              }
               accumulatedText += deltaText;
               if (onChunk) onChunk(deltaText, accumulatedText);
             }
@@ -507,12 +731,32 @@ Create the new notes for this timestamp range only. Ground every factual stateme
           const delta = parsed.choices?.[0]?.delta?.content || '';
           const tailText = typeof delta === 'string' ? delta : (Array.isArray(delta) ? delta.map(part => part.text || '').join('') : '');
           if (tailText) {
+            if (firstTokenMs === null) {
+              clearFirstTokenTimeout();
+              firstTokenMs = Math.round(performance.now() - requestStartedAt);
+              this.emitDiagnostics(onDiagnostics, {
+                type: 'first-token',
+                provider: 'openai-compatible',
+                model: this.customModel || 'gpt-4o-mini',
+                firstTokenMs
+              });
+            }
             accumulatedText += tailText;
             if (onChunk) onChunk(tailText, accumulatedText);
           }
         } catch (e) { console.warn('[HoverNotes AI] Ignored incomplete final SSE event.'); }
       }
     }
+    this.emitDiagnostics(onDiagnostics, {
+      type: 'stream-complete',
+      provider: 'openai-compatible',
+      model: this.customModel || 'gpt-4o-mini',
+      httpStatus: response.status,
+      responseHeadersMs,
+      firstTokenMs,
+      totalRequestMs: Math.round(performance.now() - requestStartedAt),
+      generatedCharacters: accumulatedText.length
+    });
     if (onComplete) onComplete(accumulatedText);
     return accumulatedText;
   }

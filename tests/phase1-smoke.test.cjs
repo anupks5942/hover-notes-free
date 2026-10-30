@@ -37,6 +37,7 @@ function sseResponse(body, status = 200) {
 (async () => {
   const client = window.geminiClient;
   assert.match(client.systemPrompt, /primary record of what the instructor said/i);
+  assert.match(client.systemPrompt, /Attribute the instructor's promises, guarantees, opinions, and personal claims explicitly/i);
   assert.doesNotMatch(client.systemPrompt, /1D\/2D Array address calculation|UB - LB \+ 1/);
 
   let requestUrl = '';

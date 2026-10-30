@@ -134,12 +134,25 @@ function inbound(type, payload = {}) {
   assert.equal(selectedTrack.languageCode, 'hi-large');
   const largeUrl = `https://www.youtube.com/api/timedtext?v=${videoId}&lang=hi-large&fmt=json3&potc=1&pot=${token}`;
   await window.fetch(largeUrl);
-  await new Promise(resolve => setTimeout(resolve, 250));
-  const startMessage = emitted.filter(m => m.type === 'CAPTION_BODY_START').at(-1);
+  // The observer reads a cloned response body asynchronously after fetch resolves.
+  // Wait for the start event itself before waiting for the deliberately chunked relay.
+  let startMessage;
+  for (let attempt = 0; attempt < 500; attempt++) {
+    startMessage = emitted.filter(m => m.type === 'CAPTION_BODY_START').at(-1);
+    if (startMessage) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.ok(startMessage, 'large caption response should use the chunked relay protocol');
   assert.equal(startMessage.responseCharacters, 13_969_317);
-  const chunks = emitted.filter(m => m.type === 'CAPTION_BODY_CHUNK' && m.transferId === startMessage.transferId)
-    .sort((a, b) => a.index - b.index);
+  // The sender deliberately yields between chunks. Poll for completion rather than
+  // assuming a fixed delay is enough on a loaded event loop.
+  let chunks = [];
+  for (let attempt = 0; attempt < 500; attempt++) {
+    chunks = emitted.filter(m => m.type === 'CAPTION_BODY_CHUNK' && m.transferId === startMessage.transferId)
+      .sort((a, b) => a.index - b.index);
+    if (chunks.length === startMessage.totalChunks) break;
+    await new Promise(resolve => setTimeout(resolve, 10));
+  }
   assert.equal(chunks.length, startMessage.totalChunks);
   const reassembled = chunks.map(chunk => chunk.chunk).join('');
   assert.equal(reassembled.length, responseBody.length);

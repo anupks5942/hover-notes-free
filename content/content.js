@@ -14,6 +14,7 @@
   
   // Transcript cache: videoId -> Array<{ start: number, duration: number, text: string }>
   const transcriptCache = new Map();
+  const transcriptPerformanceCache = new Map();
   // Caption tracks cache: videoId -> Array<CaptionTrack>
   const captionTracksCache = new Map();
   const transcriptDiagnostics = new Map();
@@ -22,6 +23,17 @@
   const captionBodyTransfers = new Map();
   const MAX_CAPTION_BODY_CHARS = 40 * 1024 * 1024;
   const captionActivationDiagnostics = new Map();
+  let studyFrameSamplerTimer = null;
+  let studyFrameSamplerActive = false;
+  let studyFrameSamplingBusy = false;
+  const studyFrameCandidates = new Map(); // minute bucket -> best relevant frame
+  const MAX_STUDY_FRAME_BUCKETS = 20;
+
+  function performanceNow() {
+    return (typeof performance !== 'undefined' && typeof performance.now === 'function')
+      ? performance.now()
+      : Date.now();
+  }
 
   // =========================================================================
   // Time and String Utilities
@@ -407,12 +419,30 @@
   // return HTTP 200 with an empty body. We observe the player's response instead
   // of constructing or logging a token ourselves.
   async function getFullTranscript(videoId) {
+    const retrievalStartedAt = performanceNow();
     if (!videoId) {
       transcriptDiagnostics.set('unknown', 'The current YouTube video ID could not be detected.');
       return [];
     }
-    if (transcriptCache.has(videoId)) return transcriptCache.get(videoId);
+    if (transcriptCache.has(videoId)) {
+      const cachedItems = transcriptCache.get(videoId);
+      const cacheMetrics = {
+        cacheHit: true,
+        totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
+        trackDiscoveryMs: 0,
+        playerWaitMs: 0,
+        captionParseMs: 0,
+        cueCount: cachedItems.length
+      };
+      transcriptPerformanceCache.set(videoId, cacheMetrics);
+      console.info('[HoverNotes Performance] Caption transcript cache hit', {
+        videoId,
+        ...cacheMetrics
+      });
+      return cachedItems;
+    }
 
+    const trackDiscoveryStartedAt = performanceNow();
     let tracks = captionTracksCache.get(videoId);
     if (!tracks || tracks.length === 0) {
       requestMainWorldCaptionTracks(videoId);
@@ -434,6 +464,16 @@
     if (!tracks || tracks.length === 0) {
       const diagnostic = `No caption tracks were exposed by the YouTube player for video ${videoId}.`;
       transcriptDiagnostics.set(videoId, diagnostic);
+      const metrics = {
+        cacheHit: false,
+        totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
+        trackDiscoveryMs: Math.round(performanceNow() - trackDiscoveryStartedAt),
+        playerWaitMs: 0,
+        captionParseMs: 0,
+        outcome: 'no-caption-tracks'
+      };
+      transcriptPerformanceCache.set(videoId, metrics);
+      console.info('[HoverNotes Performance] Caption transcript load finished', { videoId, ...metrics });
       console.warn('[HoverNotes Captions] No caption tracks available', { videoId });
       return [];
     }
@@ -442,15 +482,28 @@
     if (!bestTrack || !bestTrack.languageCode) {
       const diagnostic = `Found ${tracks.length} caption track(s), but none had a usable language identifier.`;
       transcriptDiagnostics.set(videoId, diagnostic);
+      const metrics = {
+        cacheHit: false,
+        totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
+        trackDiscoveryMs: Math.round(performanceNow() - trackDiscoveryStartedAt),
+        playerWaitMs: 0,
+        captionParseMs: 0,
+        outcome: 'invalid-caption-track'
+      };
+      transcriptPerformanceCache.set(videoId, metrics);
+      console.info('[HoverNotes Performance] Caption transcript load finished', { videoId, ...metrics });
       console.warn('[HoverNotes Captions] Track metadata was incomplete', { videoId, trackCount: tracks.length });
       return [];
     }
+    const trackDiscoveryMs = Math.round(performanceNow() - trackDiscoveryStartedAt);
 
     // Register the waiter BEFORE asking the player to activate captions because
     // the resulting fetch/XHR can complete quickly.
     const bodyPromise = waitForPlayerCaptionBody(videoId, bestTrack.languageCode, 32000);
+    const playerWaitStartedAt = performanceNow();
     requestPlayerCaptionBody(videoId, bestTrack);
     const response = await bodyPromise;
+    const playerWaitMs = Math.round(performanceNow() - playerWaitStartedAt);
 
     if (!response.body?.trim()) {
       const reason = response.timeout
@@ -464,6 +517,17 @@
       const activationDetail = activation && !activation.startsWith('Player activation requested') ? ` Player activation: ${activation}` : '';
       const diagnostic = `Found ${tracks.length} caption track(s) (${bestTrack.languageCode}), but no caption text was captured. ${reason}${activationDetail}`;
       transcriptDiagnostics.set(videoId, diagnostic);
+      const metrics = {
+        cacheHit: false,
+        trackDiscoveryMs,
+        playerWaitMs,
+        captionParseMs: 0,
+        totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
+        responseCharacters: response.responseCharacters || 0,
+        outcome: 'empty-player-response'
+      };
+      transcriptPerformanceCache.set(videoId, metrics);
+      console.info('[HoverNotes Performance] Caption transcript load finished', { videoId, ...metrics });
       console.error('[HoverNotes Captions] Player caption response was empty or unavailable', {
         videoId,
         languageCode: bestTrack.languageCode,
@@ -478,6 +542,7 @@
 
     let parsedItems = [];
     const body = response.body;
+    const captionParseStartedAt = performanceNow();
     try {
       parsedItems = parseJson3TimedText(JSON.parse(body));
     } catch (_) {
@@ -491,6 +556,17 @@
     if (parsedItems.length === 0) {
       const diagnostic = `Captured ${body.length} characters from the YouTube player (${bestTrack.languageCode}), but the response contained no supported caption cues.`;
       transcriptDiagnostics.set(videoId, diagnostic);
+      const metrics = {
+        cacheHit: false,
+        trackDiscoveryMs,
+        playerWaitMs,
+        captionParseMs: Math.round(performanceNow() - captionParseStartedAt),
+        totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
+        responseCharacters: body.length,
+        outcome: 'zero-parsed-cues'
+      };
+      transcriptPerformanceCache.set(videoId, metrics);
+      console.info('[HoverNotes Performance] Caption transcript load finished', { videoId, ...metrics });
       console.error('[HoverNotes Captions] Player response captured but parsed to zero cues', {
         videoId, languageCode: bestTrack.languageCode, responseCharacters: body.length,
         contentType: response.contentType, transport: response.transport
@@ -500,6 +576,20 @@
 
     parsedItems.sort((a, b) => a.start - b.start);
     transcriptCache.set(videoId, parsedItems);
+    const metrics = {
+      cacheHit: false,
+      trackCount: tracks.length,
+      languageCode: bestTrack.languageCode,
+      trackDiscoveryMs,
+      playerWaitMs,
+      captionParseMs: Math.round(performanceNow() - captionParseStartedAt),
+      totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
+      responseCharacters: body.length,
+      cueCount: parsedItems.length,
+      outcome: 'success'
+    };
+    transcriptPerformanceCache.set(videoId, metrics);
+    console.info('[HoverNotes Performance] Caption transcript load finished', { videoId, ...metrics });
     transcriptDiagnostics.set(videoId,
       `Loaded ${parsedItems.length} caption cues from the YouTube player (${bestTrack.languageCode}).`);
     console.info('[HoverNotes Captions] Player caption retrieval succeeded', {
@@ -518,6 +608,7 @@
     const meta = getVideoMetadata();
     const videoId = meta.videoId;
     const fullTranscript = await getFullTranscript(videoId);
+    const transcriptPerformance = transcriptPerformanceCache.get(videoId) || null;
 
     let start = Math.max(0, typeof startTime === 'number' ? startTime : 0);
     let end = typeof endTime === 'number' ? endTime : (meta.currentTime || 0);
@@ -529,12 +620,14 @@
         success: true, videoId, videoTitle: meta.videoTitle, videoUrl: meta.videoUrl,
         currentTime: meta.currentTime, timestampStr: meta.timestampStr,
         duration: meta.duration, sliceStart: start, sliceEnd: end,
-        itemCount: 0, lines: [], transcriptText: '', diagnostic: transcriptDiagnostics.get(videoId) || 'Invalid transcript interval.'
+        itemCount: 0, lines: [], transcriptText: '', diagnostic: transcriptDiagnostics.get(videoId) || 'Invalid transcript interval.',
+        performance: { ...transcriptPerformance, sliceFilterMs: 0, fullCueCount: fullTranscript.length }
       };
     }
 
     // Preserve original caption-overlap semantics: include cues that began before
     // the interval but continue into it. This avoids dropping boundary-crossing speech.
+    const sliceStartedAt = performanceNow();
     const sliceItems = fullTranscript.filter(
       item => item.start + item.duration >= start && item.start <= end
     );
@@ -555,7 +648,13 @@
       itemCount: sliceItems.length,
       lines,
       transcriptText,
-      diagnostic: transcriptDiagnostics.get(videoId) || ''
+      diagnostic: transcriptDiagnostics.get(videoId) || '',
+      performance: {
+        ...transcriptPerformance,
+        sliceFilterMs: Math.round(performanceNow() - sliceStartedAt),
+        fullCueCount: fullTranscript.length,
+        sliceCueCount: sliceItems.length
+      }
     };
   }
 
@@ -638,6 +737,99 @@
         img.src = response.dataUrl;
       });
     });
+  }
+
+  // Passive study-frame sampling. It never seeks or pauses YouTube: while AI Notes
+  // is active, a low-resolution frame is scored every 2.5 seconds. Only the best
+  // qualifying frame in each video-minute bucket is retained.
+  function analyzeCurrentStudyFrame(video) {
+    try {
+      if (!window.HoverNotesFrameQuality) throw new Error('Frame-quality helper is unavailable.');
+      const canvas = document.createElement('canvas');
+      canvas.width = 320; canvas.height = 180;
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
+      return window.HoverNotesFrameQuality.analyzeRgbaPixels(pixels.data, pixels.width, pixels.height);
+    } catch (error) {
+      return { method: 'edge-density-v1', isStudyRelevant: false, score: 0,
+        edgeDensity: 0, detailedTileCount: 0, reason: 'quality-check-unavailable' };
+    }
+  }
+
+  async function considerStudyFrame(video) {
+    if (!studyFrameSamplerActive || studyFrameSamplingBusy || !video || video.paused ||
+        video.readyState < 2 || video.videoWidth < 1 || video.videoHeight < 1) return;
+    studyFrameSamplingBusy = true;
+    try {
+      const sampleTime = Number(video.currentTime) || 0;
+      const quality = analyzeCurrentStudyFrame(video);
+      if (!quality.isStudyRelevant) return;
+      const minuteBucket = Math.floor(sampleTime / 60);
+      const previous = studyFrameCandidates.get(minuteBucket);
+      if (previous && previous.quality.score >= quality.score) return;
+      const dataUrl = await captureVideoFrame();
+      if (!studyFrameSamplerActive || !dataUrl) return;
+      studyFrameCandidates.set(minuteBucket, { time: sampleTime, dataUrl, quality, minuteBucket });
+      while (studyFrameCandidates.size > MAX_STUDY_FRAME_BUCKETS) {
+        studyFrameCandidates.delete(studyFrameCandidates.keys().next().value);
+      }
+    } catch (error) {
+      console.debug('[HoverNotes Frames] A frame sample was skipped:', error?.message || error);
+    } finally { studyFrameSamplingBusy = false; }
+  }
+
+  function startStudyFrameSampler() {
+    if (studyFrameSamplerTimer) clearInterval(studyFrameSamplerTimer);
+    studyFrameCandidates.clear();
+    studyFrameSamplerActive = true;
+    studyFrameSamplingBusy = false;
+    studyFrameSamplerTimer = setInterval(() => { void considerStudyFrame(getVideoElement()); }, 2500);
+    console.info('[HoverNotes Frames] Study-frame sampler started', { intervalMs: 2500, qualityMethod: 'edge-density-v1' });
+    return { success: true, active: true };
+  }
+
+  function stopStudyFrameSampler() {
+    studyFrameSamplerActive = false;
+    if (studyFrameSamplerTimer) clearInterval(studyFrameSamplerTimer);
+    studyFrameSamplerTimer = null;
+    const retainedCandidateCount = studyFrameCandidates.size;
+    studyFrameCandidates.clear();
+    return { success: true, active: false, retainedCandidateCount };
+  }
+
+  async function getBestStudyFrame(startTime, endTime) {
+    const start = Math.max(0, Number(startTime) || 0);
+    const end = Math.max(start, Number(endTime) || 0);
+    const matches = Array.from(studyFrameCandidates.values()).filter(candidate => {
+      const candidateSecond = Math.floor(candidate.time);
+      return candidateSecond >= start && candidateSecond <= end;
+    });
+    // Include the current frame as a final candidate. This catches a slide that
+    // appears just before Stop without seeking or disturbing playback.
+    const video = getVideoElement();
+    if (video && Number.isFinite(video.currentTime) && Math.floor(video.currentTime) >= start &&
+        Math.floor(video.currentTime) <= end && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
+      const sampleTime = Number(video.currentTime);
+      const quality = analyzeCurrentStudyFrame(video);
+      if (quality.isStudyRelevant) {
+        try {
+          const dataUrl = await captureVideoFrame();
+          if (dataUrl) matches.push({ time: sampleTime, dataUrl, quality });
+        } catch (error) {
+          console.debug('[HoverNotes Frames] Current-frame candidate was skipped:', error?.message || error);
+        }
+      }
+    }
+    matches.sort((a, b) => b.quality.score - a.quality.score || b.time - a.time);
+    const best = matches[0] || null;
+    console.info('[HoverNotes Frames] Study-frame selection completed', {
+      startTime: Math.floor(start), endTime: Math.floor(end),
+      sampledCandidates: studyFrameCandidates.size, eligibleCandidates: matches.length,
+      selected: Boolean(best), selectedTime: best ? Number(best.time.toFixed(2)) : null,
+      qualityScore: best?.quality.score ?? null, qualityMethod: 'edge-density-v1'
+    });
+    return best;
   }
 
   // =========================================================================
@@ -805,14 +997,31 @@
       case 'GET_VIDEO_STATE':
         return { success: true, state: getVideoMetadata() };
 
+      case 'START_STUDY_FRAME_SAMPLER':
+        return startStudyFrameSampler();
+
+      case 'STOP_STUDY_FRAME_SAMPLER':
+        return stopStudyFrameSampler();
+
       case 'CAPTURE_FRAME': {
         try {
+          if (payload?.selectBestStudyFrame) {
+            const state = getVideoMetadata();
+            const best = await getBestStudyFrame(payload?.startTime, payload?.endTime);
+            return {
+              success: true, dataUrl: best?.dataUrl || null,
+              frameTime: best?.time ?? null,
+              frameQuality: best?.quality || {
+                method: 'edge-density-v1', isStudyRelevant: false, score: 0,
+                reason: 'no-study-relevant-frame-found'
+              },
+              videoState: state
+            };
+          }
           const dataUrl = await captureVideoFrame();
           const state = getVideoMetadata();
-          return { success: true, dataUrl, videoState: state };
-        } catch (err) {
-          return { success: false, error: err.message };
-        }
+          return { success: true, dataUrl, videoState: state, frameTime: state.currentTime };
+        } catch (err) { return { success: false, error: err.message }; }
       }
 
       case 'GET_TRANSCRIPT_SLICE': {
@@ -939,6 +1148,10 @@
     const newVideoId = extractVideoId();
     if (newVideoId && newVideoId !== currentVideoId) {
       currentVideoId = newVideoId;
+      studyFrameCandidates.clear();
+      if (studyFrameSamplerTimer) clearInterval(studyFrameSamplerTimer);
+      studyFrameSamplerTimer = null;
+      studyFrameSamplerActive = false;
       requestMainWorldCaptionTracks(newVideoId);
       sendToSidebar({
         action: 'VIDEO_CHANGED',

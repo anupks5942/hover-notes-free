@@ -98,6 +98,24 @@ function mainMessage(data) {
   assert.equal(result.lines[0].startsWith('[00:00] '), true);
   assert.equal(result.transcriptText.length, '[00:00] '.length + spoken.length);
   assert.equal(result.transcriptText.endsWith(spoken), true);
+
+  assert.equal(result.performance.cacheHit, false);
+  assert.equal(result.performance.cueCount, 1);
+  assert.ok(Number.isFinite(result.performance.totalLoadMs));
+  assert.ok(Number.isFinite(result.performance.captionParseMs));
+
+  // A second interval reuses the parsed cues and reports the cache hit distinctly.
+  const cachedResponsePromise = new Promise(resolve => {
+    runtimeListener({
+      action: 'GET_TRANSCRIPT_SLICE',
+      payload: { startTime: 0, endTime: 30 }
+    }, {}, resolve);
+  });
+  const cachedResult = await cachedResponsePromise;
+  assert.equal(cachedResult.success, true);
+  assert.equal(cachedResult.performance.cacheHit, true);
+  assert.equal(cachedResult.performance.cueCount, 1);
+
   console.log(`PASS: isolated content script reassembled ${body.length.toLocaleString()} characters across ${totalChunks} chunks and parsed one Hindi cue.`);
 })().catch(error => {
   console.error(error);
