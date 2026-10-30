@@ -33,7 +33,11 @@ NON-NEGOTIABLE GROUNDING RULES:
 7. Clearly distinguish instructor material from uncertain extraction. Attribute the instructor's promises, guarantees, opinions, and personal claims explicitly (for example, ‘The instructor claims…’); do not present them as independently verified facts. Do not add practice questions or supplementary teaching unless explicitly requested.
 8. Use the timestamp range in the user message. Add concise timestamp anchors to major concepts when the transcript provides them.
 9. The previous-notes context is only to avoid repetition. Do not rewrite it. Add genuinely new information, or briefly clarify a previous point only when this segment explicitly develops it.
-10. Output only the new Markdown section(s). Do not reproduce YAML frontmatter or the document title. If the segment contains no new technical content, output: <!-- No new technical content in this segment. -->`;
+10. Organize new material in strictly increasing lecture-time order. Never place a later idea before an earlier idea just because it appears in the attached still frame.
+11. Begin each major concept heading with its earliest supported transcript timestamp (for example, a heading like ### [01:39] Concept). Do not invent timestamps.
+12. Do not output screenshot headings, Obsidian image embeds, image paths, or Markdown image links. The extension inserts selected images itself.
+13. Do not repeat a definition or explanation already present in previous notes. When a concept is revisited, document only the genuinely new development.
+14. Output only the new Markdown section(s). Do not reproduce YAML frontmatter or the document title. If the segment contains no new technical content, output: <!-- No new technical content in this segment. -->`;
   }
 
   // Load configuration from chrome.storage.local
@@ -217,12 +221,54 @@ NON-NEGOTIABLE GROUNDING RULES:
     return this.testConnection(available[0].index);
   }
 
+  // Remove extension-managed image blocks from previous-note context. The model
+  // must not copy screenshot links; the extension owns screenshot insertion.
+  sanitizePreviousNotes(markdown) {
+    const lines = String(markdown || '').split(/\r?\n/);
+    const output = [];
+    for (let i = 0; i < lines.length; i++) {
+      const isManagedImage = /^\s*!\[\[HoverNotes\/images\/[^\]]+\]\]\s*$/.test(lines[i]);
+      if (isManagedImage) {
+        const previous = output[output.length - 1] || '';
+        if (/^\s*###\s+\[[^\]]+\]\(https?:\/\/[^)]+\)\s*$/.test(previous)) output.pop();
+        continue;
+      }
+      if (/^\s*!\[[^\]]*\]\([^)]*\)\s*$/.test(lines[i])) continue;
+      output.push(lines[i]);
+    }
+    return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // Sort major timestamped Markdown sections after generation. Streaming may
+  // briefly show model order, but the persisted note is normalized chronologically.
+  sortTimestampedSections(markdown) {
+    const lines = String(markdown || '').split(/\r?\n/);
+    const starts = [];
+    const timestampPattern = /^\s*#{2,3}\s+.*?\[((?:\d{1,2}:)?\d{2}:\d{2})(?:\s*[–-]\s*(?:\d{1,2}:)?\d{2}:\d{2})?\]/;
+    for (let index = 0; index < lines.length; index++) {
+      const match = lines[index].match(timestampPattern);
+      if (!match) continue;
+      const parts = match[1].split(':').map(Number);
+      const seconds = parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts[0] * 60 + parts[1];
+      starts.push({ index, seconds, originalIndex: starts.length });
+    }
+    if (starts.length < 2) return lines.join('\n').trim();
+    const prefix = lines.slice(0, starts[0].index);
+    const blocks = starts.map((start, i) => ({
+      ...start,
+      lines: lines.slice(start.index, i + 1 < starts.length ? starts[i + 1].index : lines.length)
+    }));
+    blocks.sort((a, b) => a.seconds - b.seconds || a.originalIndex - b.originalIndex);
+    return [...prefix, ...blocks.flatMap(block => block.lines)].join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
   // Spec 4: Ultra-Fast SSE Stream Generator with Zero Thinking Delay & Multi-Key Failover
   async generateNotesStream({
     videoTitle,
     currentTimestamp,
     transcriptChunk,
     frameBase64,
+    frameTimestamp = null,
     modeLabel = 'Lecture Notes',
     onChunk,
     onComplete,
@@ -255,10 +301,11 @@ NON-NEGOTIABLE GROUNDING RULES:
 
     if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
 
-    const priorContext = String(existingNotes || '').slice(-12000);
+    const priorContext = this.sanitizePreviousNotes(existingNotes).slice(-12000);
     const userPrompt = `Video title: ${videoTitle}
 Lecture timestamp range: ${currentTimestamp}
 Generation mode: ${modeLabel}
+Visual evidence timestamp: ${frameBase64 && frameTimestamp ? frameTimestamp : '[No visual frame attached]'}
 
 TRANSCRIPT EVIDENCE (primary source):
 """
@@ -270,7 +317,14 @@ PREVIOUS NOTE CONTEXT (use only to avoid repeating material; do not copy it):
 ${priorContext || '[No earlier notes in this run.]'}
 """
 
-Create the new notes for this timestamp range only. Ground every factual statement in the transcript or visibly legible frame. Preserve the instructor's examples and numbers exactly. Never add generic GATE/DSA material to fill space. Do not label an AI-generated example as an instructor example. If there is insufficient evidence, write less rather than guess.`;
+Create the new notes for this timestamp range only. Ground every factual statement in the transcript or visibly legible frame. Preserve the instructor's examples and numbers exactly. Never add generic GATE/DSA material to fill space. Do not label an AI-generated example as an instructor example. If there is insufficient evidence, write less rather than guess.
+
+CHRONOLOGY AND ASSET RULES:
+- Follow the transcript cue timestamps in strictly ascending order.
+- Put each major topic under a heading beginning with its earliest supported timestamp.
+- The attached frame was captured at ${frameBase64 && frameTimestamp ? frameTimestamp : 'an unspecified time'}; visual-only observations belong at that time, never earlier in the interval.
+- Never output image Markdown, Obsidian wiki-links, screenshot headings, image filenames, or copied previous-note media. The extension inserts selected screenshots after generation.
+- Do not restate definitions already covered in previous notes; add only new information from this interval.`;
 
     const preferredModel = this.sessionPreferredModel || this.activeModel || this.primaryModel;
     const modelsToTry = [preferredModel, this.primaryModel, this.fallbackModel]

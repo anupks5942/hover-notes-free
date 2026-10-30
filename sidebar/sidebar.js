@@ -735,6 +735,8 @@ tags: [hovernotes, gate-cs, study-notes]
     const startTime = Math.floor(state.lastProcessedTime || 0);
     let endTime = startTime;
     let didAppend = false;
+    let frameData = { dataUrl: null, seconds: null, timestamp: null, quality: null };
+    let includeCapturedFrame = false;
     const startedAt = perfNow();
     const previewStart = { ...state.previewRenderMetrics };
     const report = {
@@ -773,35 +775,11 @@ tags: [hovernotes, gate-cs, study-notes]
       const title = elements.noteTitleInput.value.trim() || video.videoTitle || 'Lecture';
       const videoUrl = video.videoUrl || window.location.href;
 
-      // Select the best sampled slide-like frame in this interval without seeking.
-      // Do not persist/embed it unless transcript extraction and AI synthesis succeed.
-      stageStartedAt = perfNow();
-      const frameData = await captureFrameData(endTime, {
-        selectBestStudyFrame: true, startTime, endTime
-      });
-      report.stages.frameCaptureMs = elapsedMs(stageStartedAt);
-      const capturedFrameTime = Number.isFinite(frameData.seconds) ? Math.floor(frameData.seconds) : null;
-      let includeCapturedFrame = Boolean(frameData.dataUrl && frameData.quality?.isStudyRelevant);
-      report.frameQuality = frameData.quality || null;
-      if (!includeCapturedFrame) report.screenshotSkipped = frameData.quality?.reason || 'No study-relevant frame was available in this interval.';
-      if (Number.isFinite(endTimeLimit)) {
-        const frozenBoundary = Math.floor(endTimeLimit);
-        // Keep transcript boundaries independent of the selected screenshot timestamp.
-        endTime = Math.min(endTime, frozenBoundary);
-        // Never label a later visual frame with an earlier timestamp. If playback moved
-        // after Stop, keep transcript processing bounded and omit that out-of-range frame.
-        includeCapturedFrame = includeCapturedFrame && capturedFrameTime !== null && capturedFrameTime <= frozenBoundary;
-        if (frameData.dataUrl && capturedFrameTime !== null && capturedFrameTime > frozenBoundary) {
-          report.screenshotSkipped = 'The captured frame was after the frozen Stop boundary.';
-          console.warn('[HoverNotes AI] Screenshot omitted because capture occurred after Stop.', {
-            capturedFrameAt: formatTime(capturedFrameTime),
-            stopBoundary: formatTime(frozenBoundary)
-          });
-        }
-      }
       if (endTime <= startTime) throw new Error('The video timestamp did not advance beyond the last processed timestamp.');
       if (signal.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
 
+      // Extract transcript first. Screenshot selection uses this interval's actual
+      // words to suppress obvious promotional frames before saving any image.
       stageStartedAt = perfNow();
       const sliceRes = await sendBridgeMessage('GET_TRANSCRIPT_SLICE', { startTime, endTime });
       report.stages.transcriptExtractionMs = elapsedMs(stageStartedAt);
@@ -811,6 +789,31 @@ tags: [hovernotes, gate-cs, study-notes]
         throw new Error(`No captions were available for this interval. Progress was not advanced.${details}`);
       }
       if (signal.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
+
+      // Select a slide-like frame only when transcript context is not promotional.
+      // Selection is passive; no seek/pause is performed by the sampler.
+      stageStartedAt = perfNow();
+      frameData = await captureFrameData(endTime, {
+        selectBestStudyFrame: true, startTime, endTime,
+        transcriptText: sliceRes.transcriptText
+      });
+      report.stages.frameCaptureMs = elapsedMs(stageStartedAt);
+      const capturedFrameTime = Number.isFinite(frameData.seconds) ? Math.floor(frameData.seconds) : null;
+      includeCapturedFrame = Boolean(frameData.dataUrl && frameData.quality?.isStudyRelevant);
+      report.frameQuality = frameData.quality || null;
+      if (!includeCapturedFrame) report.screenshotSkipped = frameData.quality?.reason || 'No study-relevant frame was available in this interval.';
+      if (Number.isFinite(endTimeLimit)) {
+        const frozenBoundary = Math.floor(endTimeLimit);
+        // Keep transcript boundaries independent of the selected screenshot timestamp.
+        endTime = Math.min(endTime, frozenBoundary);
+        includeCapturedFrame = includeCapturedFrame && capturedFrameTime !== null && capturedFrameTime <= frozenBoundary;
+        if (frameData.dataUrl && capturedFrameTime !== null && capturedFrameTime > frozenBoundary) {
+          report.screenshotSkipped = 'The captured frame was after the frozen Stop boundary.';
+          console.warn('[HoverNotes AI] Screenshot omitted because capture occurred after Stop.', {
+            capturedFrameAt: formatTime(capturedFrameTime), stopBoundary: formatTime(frozenBoundary)
+          });
+        }
+      }
 
       const CHUNK_SIZE = 300;
       const fullLines = sliceRes.lines;
@@ -857,6 +860,7 @@ tags: [hovernotes, gate-cs, study-notes]
             transcriptChunk: segLines.join('\n'),
             // The only captured still belongs to the latest segment, not earlier segments.
             frameBase64: seg === segmentCount - 1 && includeCapturedFrame ? frameData.dataUrl : null,
+            frameTimestamp: seg === segmentCount - 1 && includeCapturedFrame ? frameData.timestamp : null,
             modeLabel: 'Transcript-grounded lecture notes',
             existingNotes: priorNotes,
             signal,
@@ -875,6 +879,19 @@ tags: [hovernotes, gate-cs, study-notes]
           report.stages.geminiMs += elapsedMs(geminiStartedAt);
         }
         if (generated && generated.trim()) {
+          // The model must never be allowed to duplicate extension-managed media
+          // embeds from prior-note context. Remove any such lines if it emits them.
+          const cleanGenerated = window.geminiClient.sortTimestampedSections(
+            window.geminiClient.sanitizePreviousNotes(generated)
+          );
+          if (cleanGenerated !== generated) {
+            const streamedSuffix = `${generated}\n\n`;
+            if (elements.noteEditor.value.endsWith(streamedSuffix)) {
+              elements.noteEditor.value = elements.noteEditor.value.slice(0, -streamedSuffix.length) + `${cleanGenerated}\n\n`;
+              scheduleMarkdownPreviewRender();
+            }
+            generated = cleanGenerated;
+          }
           report.generatedCharacters += generated.length;
         }
       }
@@ -887,6 +904,12 @@ tags: [hovernotes, gate-cs, study-notes]
       if (includeCapturedFrame) {
         stageStartedAt = perfNow();
         await persistCapturedFrame(title, frameData, videoUrl);
+        if (frameData.quality?.fingerprint) {
+          await sendBridgeMessage('MARK_STUDY_FRAME_USED', {
+            fingerprint: frameData.quality.fingerprint,
+            regionFingerprints: frameData.quality.regionFingerprints || []
+          });
+        }
         report.stages.framePersistenceMs = elapsedMs(stageStartedAt);
       } else {
         report.stages.framePersistenceMs = 0;

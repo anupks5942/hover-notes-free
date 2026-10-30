@@ -35,6 +35,15 @@ function sseResponse(body, status = 200) {
 }
 
 (async () => {
+  const sanitizedPrior = window.geminiClient.sanitizePreviousNotes(`# Note\n\n### [02:38](https://youtube.com/watch?v=x&t=158s)\n![[HoverNotes/images/screenshot-old.jpg]]\n\n### [03:00] New concept\nText.`);
+  assert.doesNotMatch(sanitizedPrior, /screenshot-old|02:38/);
+  assert.match(sanitizedPrior, /03:00.*New concept/);
+  const sortedSections = window.geminiClient.sortTimestampedSections('### [02:38] Later slide\nLater material.\n\n### [01:39] Earlier DSA context\nEarlier material.');
+  assert.ok(sortedSections.indexOf('[01:39]') < sortedSections.indexOf('[02:38]'),
+    'timestamped major note sections must be persisted in chronological order');
+  assert.match(window.geminiClient.systemPrompt, /strictly increasing lecture-time order/i);
+  assert.match(window.geminiClient.systemPrompt, /Do not output screenshot headings/i);
+
   const events = [];
   let fetchCount = 0;
   let requestHeader = null;

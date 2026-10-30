@@ -26,8 +26,12 @@
   let studyFrameSamplerTimer = null;
   let studyFrameSamplerActive = false;
   let studyFrameSamplingBusy = false;
-  const studyFrameCandidates = new Map(); // minute bucket -> best relevant frame
+  const studyFrameCandidates = new Map(); // minute bucket -> best visually useful frame
+  const usedStudyFrameFingerprints = []; // compact perceptual fingerprints of saved slides
   const MAX_STUDY_FRAME_BUCKETS = 20;
+  const STUDY_FRAME_DUPLICATE_DISTANCE = 10;
+  const STUDY_FRAME_MOTION_DUPLICATE_DISTANCE = 25;
+  const STUDY_FRAME_REGION_DUPLICATE_DISTANCE = 21;
 
   function performanceNow() {
     return (typeof performance !== 'undefined' && typeof performance.now === 'function')
@@ -752,8 +756,8 @@
       const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
       return window.HoverNotesFrameQuality.analyzeRgbaPixels(pixels.data, pixels.width, pixels.height);
     } catch (error) {
-      return { method: 'edge-density-v1', isStudyRelevant: false, score: 0,
-        edgeDensity: 0, detailedTileCount: 0, reason: 'quality-check-unavailable' };
+      return { method: 'edge-density-dhash-v2', isStudyRelevant: false, score: 0,
+        edgeDensity: 0, detailedTileCount: 0, fingerprint: '', reason: 'quality-check-unavailable' };
     }
   }
 
@@ -782,10 +786,11 @@
   function startStudyFrameSampler() {
     if (studyFrameSamplerTimer) clearInterval(studyFrameSamplerTimer);
     studyFrameCandidates.clear();
+    usedStudyFrameFingerprints.length = 0;
     studyFrameSamplerActive = true;
     studyFrameSamplingBusy = false;
     studyFrameSamplerTimer = setInterval(() => { void considerStudyFrame(getVideoElement()); }, 2500);
-    console.info('[HoverNotes Frames] Study-frame sampler started', { intervalMs: 2500, qualityMethod: 'edge-density-v1' });
+    console.info('[HoverNotes Frames] Study-frame sampler started', { intervalMs: 2500, qualityMethod: 'edge-density-dhash-v2', duplicateDistance: STUDY_FRAME_DUPLICATE_DISTANCE, motionDuplicateDistance: STUDY_FRAME_MOTION_DUPLICATE_DISTANCE, regionDuplicateDistance: STUDY_FRAME_REGION_DUPLICATE_DISTANCE });
     return { success: true, active: true };
   }
 
@@ -798,12 +803,49 @@
     return { success: true, active: false, retainedCandidateCount };
   }
 
-  async function getBestStudyFrame(startTime, endTime) {
+  function extractTranscriptWindowNearTime(transcriptText, targetSeconds, radiusSeconds = 12) {
+    const lines = String(transcriptText || '').split(/\r?\n/);
+    const selected = [];
+    for (const line of lines) {
+      const match = line.match(/^\[(?:(\d{1,2}):)?(\d{2}):(\d{2})\]/);
+      if (!match) continue;
+      const hours = match[1] ? Number(match[1]) : 0;
+      const minutes = Number(match[2]);
+      const seconds = Number(match[3]);
+      const absolute = hours * 3600 + minutes * 60 + seconds;
+      if (Math.abs(absolute - targetSeconds) <= radiusSeconds) selected.push(line);
+    }
+    return selected.join('\n');
+  }
+
+  async function getBestStudyFrame(startTime, endTime, transcriptText = '') {
     const start = Math.max(0, Number(startTime) || 0);
     const end = Math.max(start, Number(endTime) || 0);
+    const relevance = window.HoverNotesFrameQuality?.analyzeTranscriptRelevance(transcriptText) || {
+      shouldSuppressFrames: false, promotionalSignals: 0, instructionalSignals: 0,
+      reason: 'transcript-relevance-unavailable'
+    };
+    if (relevance.shouldSuppressFrames) {
+      const quality = {
+        method: 'transcript-gated-edge-density-dhash-v2', isStudyRelevant: false,
+        score: 0, fingerprint: '', transcriptRelevance: relevance,
+        reason: 'promotional-segment-no-study-screenshot'
+      };
+      console.info('[HoverNotes Frames] Screenshot selection skipped for promotional interval', {
+        startTime: Math.floor(start), endTime: Math.floor(end),
+        promotionalSignals: relevance.promotionalSignals,
+        instructionalSignals: relevance.instructionalSignals
+      });
+      return { dataUrl: null, time: null, quality };
+    }
+
     const matches = Array.from(studyFrameCandidates.values()).filter(candidate => {
       const candidateSecond = Math.floor(candidate.time);
-      return candidateSecond >= start && candidateSecond <= end;
+      if (candidateSecond < start || candidateSecond > end || !candidate.quality?.isStudyRelevant) return false;
+      const nearbyTranscript = extractTranscriptWindowNearTime(transcriptText, candidateSecond, 12);
+      const nearbyRelevance = window.HoverNotesFrameQuality.analyzeTranscriptRelevance(nearbyTranscript);
+      candidate.transcriptRelevance = nearbyRelevance;
+      return !nearbyRelevance.shouldSuppressFrames;
     });
     // Include the current frame as a final candidate. This catches a slide that
     // appears just before Stop without seeking or disturbing playback.
@@ -812,7 +854,10 @@
         Math.floor(video.currentTime) <= end && video.readyState >= 2 && video.videoWidth > 0 && video.videoHeight > 0) {
       const sampleTime = Number(video.currentTime);
       const quality = analyzeCurrentStudyFrame(video);
-      if (quality.isStudyRelevant) {
+      const nearbyTranscript = extractTranscriptWindowNearTime(transcriptText, Math.floor(sampleTime), 12);
+      const nearbyRelevance = window.HoverNotesFrameQuality.analyzeTranscriptRelevance(nearbyTranscript);
+      quality.transcriptRelevance = nearbyRelevance;
+      if (quality.isStudyRelevant && !nearbyRelevance.shouldSuppressFrames) {
         try {
           const dataUrl = await captureVideoFrame();
           if (dataUrl) matches.push({ time: sampleTime, dataUrl, quality });
@@ -821,15 +866,47 @@
         }
       }
     }
+
     matches.sort((a, b) => b.quality.score - a.quality.score || b.time - a.time);
-    const best = matches[0] || null;
+    const chosen = [];
+    let duplicateOfSaved = false;
+    for (const candidate of matches) {
+      const fingerprint = candidate.quality?.fingerprint || '';
+      if (!fingerprint) continue;
+      const duplicatesSaved = usedStudyFrameFingerprints.some(used =>
+        window.HoverNotesFrameQuality.areNearDuplicateFingerprints(candidate.quality, used, {
+          globalThreshold: STUDY_FRAME_DUPLICATE_DISTANCE,
+          motionGlobalThreshold: STUDY_FRAME_MOTION_DUPLICATE_DISTANCE,
+          regionThreshold: STUDY_FRAME_REGION_DUPLICATE_DISTANCE
+        })
+      );
+      if (duplicatesSaved) { duplicateOfSaved = true; continue; }
+      const duplicatesCandidate = chosen.some(previous =>
+        window.HoverNotesFrameQuality.areNearDuplicateFingerprints(candidate.quality, previous.quality, {
+          globalThreshold: STUDY_FRAME_DUPLICATE_DISTANCE,
+          motionGlobalThreshold: STUDY_FRAME_MOTION_DUPLICATE_DISTANCE,
+          regionThreshold: STUDY_FRAME_REGION_DUPLICATE_DISTANCE
+        })
+      );
+      if (duplicatesCandidate) continue;
+      chosen.push(candidate);
+    }
+    const best = chosen[0] || null;
+    const quality = best?.quality || {
+      method: 'edge-density-dhash-v2', isStudyRelevant: false, score: 0, fingerprint: '',
+      transcriptRelevance: relevance,
+      reason: duplicateOfSaved ? 'duplicate-of-previously-saved-slide' : 'no-study-relevant-frame-found'
+    };
+    if (best) quality.transcriptRelevance = relevance;
     console.info('[HoverNotes Frames] Study-frame selection completed', {
       startTime: Math.floor(start), endTime: Math.floor(end),
       sampledCandidates: studyFrameCandidates.size, eligibleCandidates: matches.length,
+      uniqueCandidates: chosen.length, previouslySavedDuplicate: duplicateOfSaved,
       selected: Boolean(best), selectedTime: best ? Number(best.time.toFixed(2)) : null,
-      qualityScore: best?.quality.score ?? null, qualityMethod: 'edge-density-v1'
+      qualityScore: best?.quality.score ?? null, qualityMethod: 'edge-density-dhash-v2',
+      transcriptRelevance: relevance
     });
-    return best;
+    return best ? { ...best, quality } : { dataUrl: null, time: null, quality };
   }
 
   // =========================================================================
@@ -1003,16 +1080,27 @@
       case 'STOP_STUDY_FRAME_SAMPLER':
         return stopStudyFrameSampler();
 
+      case 'MARK_STUDY_FRAME_USED': {
+        const fingerprint = String(payload?.fingerprint || '').toLowerCase();
+        if (/^[0-9a-f]{16}$/.test(fingerprint)) {
+          const regionFingerprints = Array.isArray(payload?.regionFingerprints) ? payload.regionFingerprints : [];
+          usedStudyFrameFingerprints.push({ fingerprint, regionFingerprints });
+          if (usedStudyFrameFingerprints.length > 100) usedStudyFrameFingerprints.shift();
+          return { success: true, usedFrameCount: usedStudyFrameFingerprints.length };
+        }
+        return { success: false, error: 'Invalid study-frame fingerprint.' };
+      }
+
       case 'CAPTURE_FRAME': {
         try {
           if (payload?.selectBestStudyFrame) {
             const state = getVideoMetadata();
-            const best = await getBestStudyFrame(payload?.startTime, payload?.endTime);
+            const best = await getBestStudyFrame(payload?.startTime, payload?.endTime, payload?.transcriptText || '');
             return {
               success: true, dataUrl: best?.dataUrl || null,
               frameTime: best?.time ?? null,
               frameQuality: best?.quality || {
-                method: 'edge-density-v1', isStudyRelevant: false, score: 0,
+                method: 'edge-density-dhash-v2', isStudyRelevant: false, score: 0, fingerprint: '',
                 reason: 'no-study-relevant-frame-found'
               },
               videoState: state

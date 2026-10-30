@@ -1,12 +1,24 @@
 # Changelog
 
+## 1.0.11 — Transcript-aware screenshot gating, slide deduplication and chronological note guidance
+
+- Keeps the v1.0.10 30-second Gemini first-token timeout, sticky session fallback model, and model-specific generation configuration unchanged.
+- Moves automatic screenshot selection until after the current transcript interval is extracted. A conservative Hindi/English transcript classifier suppresses automatic screenshots for intervals with multiple promotional signals and no instructional signals. The supplied lecture's 00:00–01:18 promotional introduction matches this rule and should no longer produce an automatic screenshot.
+- Adds a whole-frame 64-bit perceptual difference hash plus four regional hashes to visually qualified candidates. Exact/near matches use a whole-frame Hamming distance of 10 or less. If the presenter moves, a motion-aware fallback also requires a whole-frame distance of 25 or less plus two adjacent matching regions (regional distance 21 or less). The extension suppresses repeats against screenshots already saved in the current run and among candidates within the current interval. Frames are marked as used only after their screenshot has been persisted.
+- Removes extension-managed screenshot headings and Obsidian embeds from prior-note context before sending it to Gemini. It also sanitizes generated text before persistence if the model nevertheless emits managed screenshot references, preventing copied old image links from appearing twice.
+- Passes the selected frame's actual timestamp to the model and instructs it to keep transcript-derived material in strictly increasing timestamp order, place frame-only observations at the frame timestamp, and avoid repeating definitions already covered.
+- Does not add OCR or a separate vision-model call. Screenshot filtering remains a conservative transcript-promotion gate plus visual-detail scoring and perceptual deduplication; it cannot prove that every retained frame is educationally relevant or readable.
+- Adds regression tests for the supplied Hindi promotional-intro pattern, instructional transcript acceptance, near-duplicate slide hashes, managed-image context stripping, and chronology/asset prompt rules. Existing caption bridge, 40 MiB cap, 192 KiB chunk relay, Stop-boundary handling, AI prompt grounding, 300-second segment size and first-token timeout are retained.
+- All 10 automated test files pass. The new selection and note-organization behavior still requires a live Chrome smoke test; automated tests do not prove image quality or model compliance on all lecture types.
+- Bumps manifest, sidebar UI, README, VERSION.txt and changelog to `1.0.11`.
+
 ## 1.0.10 — Bounded Gemini first-token wait and study-frame selection
 
 - Adds a 30-second first-text-token timeout to each Gemini request. The timeout ends as soon as the first non-empty text delta arrives; it does not cap a successful stream after output begins. Timed-out primary attempts fall through to the configured fallback model. Once a fallback succeeds, it becomes preferred for the rest of the extension session to avoid repeating the same wait on each interval; saving model settings or reloading resets the preference. Explicit parent cancellation remains a cancellation and does not trigger fallback.
 - Sends `thinkingConfig` only to the configured primary model. The known fallback model is sent without that unsupported option, avoiding the extra HTTP 400 and duplicate retry observed in v1.0.9. The primary-model compatibility retry remains when a 400 rejects `thinkingConfig`.
 - Adds a passive frame sampler that checks a 320×180 frame every 2.5 seconds while AI Notes is active, without changing video playback or seeking. It retains the best quality-scored frame per minute (20-bucket cap) and selects the highest-scoring candidate within the current transcript interval.
 - Adds a local edge-density / distributed-detail screen. A frame failing the threshold is not attached to Gemini or saved as an automatic study screenshot; transcript-based generation continues. Manual screenshots are unchanged. The heuristic is not OCR, legibility detection, face detection, or semantic understanding.
-- Calibrates the local screenshot heuristic against the supplied v1.0.9 images: 01:19 talking-head/flag image rejected (score 29); 04:00 slide image accepted (score 88).
+- Calibrates the v1.0.10 local screenshot heuristic against the supplied v1.0.9 images: 01:19 talking-head/flag image rejected (score 29); 04:00 slide image accepted (score 88).
 - Updates the system prompt to attribute instructor promises, guarantees, opinions, and personal claims rather than presenting them as verified facts.
 - Adds regression tests for first-token timeout fallback, model-specific generation settings, and slide-like frame scoring.
 - Bumps manifest, sidebar UI, README, VERSION.txt and changelog to `1.0.10`.

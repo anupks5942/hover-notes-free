@@ -46,7 +46,18 @@ This test does not prove full HoverNotes parity, direct audio understanding, cap
 
 This observer uses undocumented YouTube player APIs and may need adjustment when YouTube changes its player. The automated tests mock browser responses; they do not prove live YouTube caption behavior.
 
-## v1.0.10 performance, model fallback and study-frame acceptance checks
+## v1.0.11 screenshot deduplication and note chronology checks
+
+1. Reload v1.0.11 from the same unpacked extension directory and refresh the YouTube tab. Keep the existing MyVault connection.
+2. Run the supplied KnowledgeGATE lecture from 00:00 at 2.0×. Let it reach 04:00, pause first, then click Stop.
+3. Confirm the 00:00–01:18 course-promotion interval logs `Screenshot selection skipped for promotional interval` and does not create an automatic image embed.
+4. Confirm the later instructional interval can select a slide. If the same slide remains visible in subsequent intervals, confirm the perceptual hash gate reports a duplicate and does not save another copy.
+5. Inspect the Markdown: each screenshot heading/embed pair must occur once; previously saved screenshot links must not be copied into the next AI-generated segment; major concept headings should have timestamps in ascending order.
+6. Compare the notes against `Transcript.txt` around 01:39–04:01. The frame at 02:38 may support a visual slide description at 02:38, but it must not move that visual information ahead of earlier transcript content.
+7. Send the single YouTube-tab Console export, generated Markdown, and screenshot files. Verify that transcript generation continues even when a screenshot is suppressed.
+8. Automated tests do not prove the model will always obey chronology instructions or that visual selection is semantically correct. Review this live result before resuming the 30-minute benchmark.
+
+## v1.0.10 performance, model fallback and initial study-frame checks
 
 1. Use the same unpacked extension directory; reload the extension and refresh the YouTube tab. Do not disconnect or reconnect the existing vault.
 2. Start the benchmark video at 00:00 and 2.0x. Start AI Notes, then pause the video at the chosen test boundary before pressing Stop.

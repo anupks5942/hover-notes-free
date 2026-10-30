@@ -23,6 +23,10 @@ assert.match(source, /Finishing…/);
 assert.match(source, /report\.outcome === 'saved' \|\| report\.outcome === 'no-new-interval'/,
   'a failed active generation must not silently trigger an automatic duplicate retry');
 assert.match(source, /scheduleMarkdownPreviewRender\(\)/);
+assert.match(source, /frameTimestamp: seg === segmentCount - 1 && includeCapturedFrame \? frameData\.timestamp : null/);
+assert.match(source, /sanitizePreviousNotes\(generated\)/, 'model-emitted managed screenshot blocks must be removed before note persistence');
+assert.match(source, /sortTimestampedSections\(/, 'generated timestamped sections must be sorted before persistence');
+assert.match(source, /regionFingerprints: frameData\.quality\.regionFingerprints/);
 assert.match(source, /}, 150\)/, 'streamed Markdown preview is batched at 150ms');
 assert.match(source, /flushMarkdownPreviewRender\(\)/);
 assert.match(source, /\[HoverNotes Performance\]/);

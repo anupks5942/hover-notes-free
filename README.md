@@ -1,6 +1,6 @@
-# HoverNotes Clone — Phase 1.0.10
+# HoverNotes Clone — Phase 1.0.11
 
-Build: 1.0.10
+Build: 1.0.11
 
 A personal Chrome Manifest V3 prototype for creating transcript-grounded YouTube lecture notes and saving them to a local Obsidian vault.
 
@@ -8,25 +8,33 @@ A personal Chrome Manifest V3 prototype for creating transcript-grounded YouTube
 
 - Google Chrome 111 or later (the caption observer is a static MAIN-world content script).
 
-## 1.0.10 bounded Gemini first-token wait and study-frame selection
+## 1.0.11 transcript-aware screenshot gating and note organization
 
-v1.0.10 keeps the transcript-grounded note-generation prompt and the 300-second segment size, but adds two targeted improvements based on the user's measured v1.0.9 run.
+v1.0.11 retains the v1.0.10 Gemini first-token timeout/fallback behavior and adds targeted fixes based on the supplied v1.0.10 live run.
 
-**Gemini first-token timeout:** each Gemini attempt gets up to 30 seconds to produce its first text token. The timeout ends when the first non-empty text delta arrives; it does not cap the duration of a healthy response stream. A timed-out attempt is recorded and the configured fallback model is tried next. Once a fallback succeeds, that model becomes preferred for the rest of the extension session so every later interval does not repeat the same 30-second wait; saving model settings or reloading resets this preference. Parent cancellation (for example, video navigation) remains a separate AbortError and does not trigger fallback. The known fallback model is sent without `thinkingConfig`; only the configured primary model receives that option. The generic 400 compatibility retry remains for a primary-model request that rejects `thinkingConfig`.
+**Promotional-frame suppression:** automatic screenshot selection now happens after transcript extraction. A conservative Hindi/English classifier suppresses screenshots when the interval contains several promotional signals and no instructional signals. This specifically targets course introductions, channel promotions, subscriptions, and similar material. It does not suppress transcript-based note generation.
 
-**Study-frame sampler:** while AI Notes is active, the YouTube content script samples a low-resolution frame every 2.5 seconds without seeking or pausing playback. A local edge-density heuristic scores visual detail and retains the best qualifying frame in each video-minute bucket (up to 20 buckets). When a transcript interval is processed, the best candidate inside that interval is attached to Gemini and saved to Obsidian. If no frame passes the heuristic, the transcript notes still proceed but no automatic screenshot is embedded. Manual screenshot capture is unchanged.
+**Slide deduplication:** visually qualified frames receive a whole-frame 64-bit difference hash plus four regional hashes. Exact/near matches use whole-frame Hamming distance ≤10; a motion-aware fallback tolerates presenter movement when the whole-frame distance is ≤25 and two adjacent regions match within distance 21. The extension avoids saving a near-duplicate of a screenshot already saved in the current AI Notes run, and it avoids choosing duplicate candidates within one interval. The frame is recorded as used only after successful screenshot persistence.
 
-The quality heuristic is deliberately described accurately: it is a cheap slide-likeness signal, **not OCR, text legibility verification, face detection, or semantic understanding**. It may reject a useful low-detail diagram or accept another highly detailed image. The threshold has been checked against the user's v1.0.9 samples: the 01:19 talking-head/flag frame is rejected (score 29), while the 04:00 slide frame is accepted (score 88). More diverse lecture videos still require live validation.
+**Managed image and note cleanup:** screenshot headings and Obsidian image embeds are removed from previous-note context before it is sent to Gemini. Generated text is also sanitized for extension-managed screenshot references before persistence. This addresses the repeated screenshot embeds seen at 02:38 and 03:38 in the supplied v1.0.10 Markdown.
 
-The note-generation instructions now tell the model to attribute instructor promises, guarantees, opinions, and personal claims explicitly rather than presenting them as independently verified facts.
+**Chronology guidance:** the model receives the selected frame's timestamp and is instructed to keep transcript-derived concepts in ascending timestamp order, place frame-only observations at the frame's actual timestamp, and avoid repeating definitions already covered in earlier segments. These are prompt constraints, not a formal guarantee that every model response will obey them.
 
-The console emits `[HoverNotes Frames]` sampler/selection summaries and `[HoverNotes Performance]` Gemini timeout/fallback records. Diagnostics continue to exclude API keys, prompt text, transcript text, caption bodies, and image data.
+The screenshot logic is deliberately limited: **there is no OCR or semantic image understanding in v1.0.11**. It combines a transcript-based promotional-intro gate, local visual-detail scoring, and perceptual duplicate detection. It cannot guarantee that every selected image is educationally relevant or that all slide text is legible.
 
-**Not yet live-verified:** the first-token timeout/fallback behavior and visual screenshot selection have passed local regression tests, but need a repeat Chrome smoke test before the 30-minute benchmark.
+The 30-second Gemini first-token timeout, sticky session fallback, model-specific request settings, caption observer/chunk relay, Stop boundary, and 300-second segment size are unchanged from v1.0.10. The new logic passed local regression tests but requires a live Chrome smoke test before a longer benchmark.
+
+## 1.0.10 bounded Gemini first-token wait and initial study-frame sampler
+
+v1.0.10 introduced a 30-second first-text-token timeout. The timeout ends when the first non-empty text delta arrives; it does not cap a healthy response stream. Timed-out primary attempts fall through to the configured fallback model. Once a fallback succeeds, it becomes preferred for the rest of the extension session to avoid repeating the same wait on each interval. Parent cancellation does not trigger fallback.
+
+It also introduced a passive frame sampler that checks a 320×180 frame every 2.5 seconds while AI Notes is active, without seeking or pausing playback. A local edge-density heuristic retained the best visually detailed frame per minute. That original heuristic was not OCR or semantic recognition and was responsible for some visually busy but unhelpful screenshots; v1.0.11 adds the transcript promotion gate and perceptual deduplication described above.
+
+The note-generation instructions attribute instructor promises, guarantees, opinions, and personal claims rather than presenting them as independently verified facts.
 
 ## 1.0.9 performance diagnostics and Stop finalization
 
-v1.0.9 added timing instrumentation without claiming that AI generation had become faster. The user's subsequent live run showed that the first Gemini request took 296.3 seconds to return its first token, while caption parsing took 468 ms and screenshot capture took 31 ms. A later segment encountered HTTP 429, HTTP 503, then a fallback-model HTTP 400 compatibility retry before succeeding. These measurements motivated the bounded first-token wait and model-specific request configuration in v1.0.10.
+v1.0.9 added timing instrumentation without claiming that AI generation had become faster. The user's subsequent live run showed that the first Gemini request took 296.3 seconds to return its first token, while caption parsing took 468 ms and screenshot capture took 31 ms. A later segment encountered HTTP 429, HTTP 503, then a fallback-model HTTP 400 compatibility retry before succeeding. These measurements motivated the bounded first-token wait and model-specific request configuration in v1.0.11.
 
 The extension reports caption cache hit/miss, track discovery, player response wait, JSON3/XML parsing, cue counts, interval filtering, Gemini attempts and key slots, HTTP status, first-token and stream timing, screenshot/persistence, preview rendering, note save and total run durations.
 
@@ -41,7 +49,7 @@ YouTube returned a valid 13,969,317-character JSON3 caption response for the sup
 - YouTube pages and accessible YouTube caption tracks, using a static MAIN-world observer to capture the player-issued timed-text response; watch-page HTML is metadata fallback only.
 - JSON3 UTF-8 captions and modern srv3 XML caption responses.
 - English-language Markdown generation from the selected caption transcript (the model translates Hindi/Hinglish captions into technical English).
-- The best locally scored slide-like frame sampled within each processed interval is stored in `HoverNotes/images/`; intervals without a qualifying frame produce transcript-only notes. Manual snapshots remain available.
+- Locally qualified frames may be stored in `HoverNotes/images/`; promotional-only intervals are suppressed and near-duplicate slide frames are skipped within a run. Manual snapshots remain available. Selection is not OCR or semantic image recognition.
 - Gemini streaming with configured key rotation and an optional OpenAI-compatible fallback endpoint.
 - Local Markdown saving in `HoverNotes/{Video_Title}.md`.
 - Obsidian wiki-link screenshot references using unique `screenshot-<24-char-id>.jpg` filenames.
@@ -50,14 +58,14 @@ YouTube returned a valid 13,969,317-character JSON3 caption response for the sup
 ## Important limitations (not yet implemented)
 
 - This build does **not** directly capture or transcribe video audio. It depends on captions exposed by YouTube. A video without an accessible caption track cannot produce faithful spoken-content notes; the extension reports this and does not advance its processing checkpoint.
-- Automatic screenshot ranking uses visual edge-density only; it is not OCR or semantic image understanding and can miss low-detail slides or retain visually busy but unhelpful frames. Sampling occurs every 2.5 seconds while AI Notes is active and does not seek or pause playback.
+- Automatic screenshot selection combines local visual-detail scoring, a conservative transcript-based promotional-intro filter, and perceptual near-duplicate detection. It is still not OCR or semantic image understanding: it can miss low-detail slides, retain visually busy but irrelevant frames in non-promotional intervals, or fail to judge text legibility. Sampling occurs every 2.5 seconds while AI Notes is active and does not seek or pause playback.
 - It is currently YouTube-specific. Generic HTML5 players, Udemy, Coursera, university LMS pages, Bilibili, Zoom/Meet recordings, and local video files are not implemented.
 - The annotation toolbar, advanced HoverNotes playback popover, multilingual selector, and other full HoverNotes UI-parity features are not part of Phase 1.
 - AI requests are sent to the configured external AI provider. Local Markdown/image saving does not mean AI processing is offline. The Gemini API key is still stored in `chrome.storage.local` for this client-side prototype; do not share extension storage exports or screenshots of Settings.
 
 ## Historical diagnostic/build notes
 
-- The sidebar header displays the installed build number (`v1.0.10`).
+- The sidebar header displays the installed build number (`v1.0.11`).
 - v1.0.4 logged service-worker proxy outcomes; that proxy path was later removed from caption acquisition.
 - v1.0.5/v1.0.6 direct-fetch and inline-script experiments were superseded by the v1.0.7 MAIN-world player observer.
 - Caption acquisition logs use the `[HoverNotes Player Bridge]` and `[HoverNotes Captions]` prefixes; v1.0.9 performance measurements use `[HoverNotes Performance]`. Large caption bodies are transferred in 192 KiB chunks (up to a guarded 40 MiB response limit); logs never include PO-token query values or caption body text.
