@@ -1,0 +1,323 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HoverNotes Clone</title>
+  <link rel="stylesheet" href="sidebar.css">
+</head>
+<body class="theme-dark">
+  <div class="sidebar-container">
+    
+    <!-- Header / Top Bar -->
+    <header class="top-bar">
+      <div class="top-bar-left">
+        <div class="app-brand">
+          <div class="brand-icon">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+              <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+              <polygon points="10,8 16,12 10,16" fill="#a882ff" stroke="none"></polygon>
+            </svg>
+          </div>
+          <span class="brand-name">HoverNotes</span>
+          <span class="build-version" title="Installed extension build">v1.0.8</span>
+        </div>
+
+        <!-- Vault Connection Pill -->
+        <button id="vault-pill-btn" class="vault-pill disconnected" title="Click to Connect Obsidian Vault">
+          <span class="pill-dot"></span>
+          <span id="vault-status-text">Connect Vault</span>
+        </button>
+      </div>
+
+      <div class="top-bar-right">
+        <!-- View Toggle -->
+        <div class="view-mode-selector">
+          <button id="view-split-btn" class="view-btn active" title="Split Editor & Preview">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+              <line x1="12" y1="3" x2="12" y2="21"></line>
+            </svg>
+          </button>
+          <button id="view-edit-btn" class="view-btn" title="Editor Only">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M12 20h9"></path>
+              <path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path>
+            </svg>
+          </button>
+          <button id="view-preview-btn" class="view-btn" title="Preview Only">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+              <circle cx="12" cy="12" r="3"></circle>
+            </svg>
+          </button>
+        </div>
+
+        <!-- Settings Modal Trigger -->
+        <button id="settings-open-btn" class="icon-action-btn" title="AI & Vault Settings" aria-label="Settings">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="3"></circle>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+          </svg>
+        </button>
+
+        <!-- Exit / Close Sidebar -->
+        <button id="exit-sidebar-btn" class="icon-action-btn exit-btn" title="Exit Split Screen" aria-label="Exit">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+          </svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- Note Title Bar & Save Status -->
+    <div class="note-meta-bar">
+      <div class="title-input-wrapper">
+        <svg class="file-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+          <polyline points="14 2 14 8 20 8"></polyline>
+        </svg>
+        <input type="text" id="note-title-input" class="note-title-input" placeholder="Note Title..." value="Untitled Video Note" spellcheck="false">
+      </div>
+      <div id="save-status-indicator" class="save-status-indicator" title="Auto-save to Obsidian vault">
+        <span class="status-icon">✓</span>
+        <span id="save-status-text">Saved</span>
+      </div>
+    </div>
+
+    <!-- Markdown Formatting Toolbar -->
+    <div class="markdown-toolbar">
+      <button class="tool-btn" data-action="bold" title="Bold (Ctrl+B)"><b>B</b></button>
+      <button class="tool-btn" data-action="italic" title="Italic (Ctrl+I)"><i>I</i></button>
+      <button class="tool-btn" data-action="h2" title="Heading 2">H2</button>
+      <button class="tool-btn" data-action="h3" title="Heading 3">H3</button>
+      <div class="toolbar-sep"></div>
+      <button class="tool-btn" data-action="bullet" title="Bullet List">• List</button>
+      <button class="tool-btn" data-action="numbered" title="Numbered List">1. List</button>
+      <button class="tool-btn" data-action="task" title="Checklist">☑ Task</button>
+      <div class="toolbar-sep"></div>
+      <button class="tool-btn" data-action="code" title="Code Block">&lt;/&gt;</button>
+      <button class="tool-btn" data-action="latex" title="LaTeX Equation">LaTeX</button>
+      <button class="tool-btn" data-action="quote" title="Blockquote">”Quote</button>
+      <div class="toolbar-sep"></div>
+      <button id="quick-timestamp-tool" class="tool-btn highlight" title="Insert Timestamp (T)">⏱ Timestamp</button>
+    </div>
+
+    <!-- Auto-Notes Live Status Bar -->
+    <div id="ai-status-indicator" class="ai-status-indicator hidden">
+      <span class="ai-pulse-dot"></span>
+      <span id="ai-status-text">AI is watching video...</span>
+    </div>
+
+    <!-- Main Workspace (Editor & Preview Panes) -->
+    <main class="main-workspace split-view" id="workspace-container">
+      <!-- Editor Pane -->
+      <section class="pane editor-pane" id="editor-pane">
+        <textarea id="note-editor" class="note-editor" placeholder="Start typing notes, press 'T' for timestamp, 'I' for screenshot snapshot, or use AI Notes..." spellcheck="false"></textarea>
+      </section>
+
+      <!-- Preview Pane -->
+      <section class="pane preview-pane" id="preview-pane">
+        <div id="note-preview" class="note-preview markdown-body">
+          <p class="preview-placeholder">Your formatted notes, screenshots, and LaTeX equations will render here in real time...</p>
+        </div>
+      </section>
+    </main>
+
+    <!-- Bottom Action & Playback Bar -->
+    <footer class="bottom-action-bar">
+      <!-- Mini Playback Controls -->
+      <div class="playback-controls-group">
+        <button id="pb-rewind-btn" class="pb-btn" title="Rewind 10s (J)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M11 17l-5-5 5-5"></path>
+            <path d="M18 17l-5-5 5-5"></path>
+          </svg>
+          <span>-10s</span>
+        </button>
+
+        <button id="pb-toggle-btn" class="pb-btn play-pause-btn" title="Play/Pause (Space)">
+          <svg id="pb-play-icon" viewBox="0 0 24 24" fill="currentColor">
+            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+          </svg>
+          <svg id="pb-pause-icon" class="hidden" viewBox="0 0 24 24" fill="currentColor">
+            <rect x="6" y="4" width="4" height="16"></rect>
+            <rect x="14" y="4" width="4" height="16"></rect>
+          </svg>
+        </button>
+
+        <button id="pb-forward-btn" class="pb-btn" title="Forward 10s (L)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M13 17l5-5-5-5"></path>
+            <path d="M6 17l5-5-5-5"></path>
+          </svg>
+          <span>+10s</span>
+        </button>
+
+        <!-- Speed Selector Pills -->
+        <div class="speed-pills">
+          <button class="speed-pill active" data-speed="1.0">1.0x</button>
+          <button class="speed-pill" data-speed="1.25">1.25x</button>
+          <button class="speed-pill" data-speed="1.5">1.5x</button>
+          <button class="speed-pill" data-speed="2.0">2.0x</button>
+        </div>
+      </div>
+
+      <!-- Core HoverNotes Actions: Capture, Timestamp, AI Notes -->
+      <div class="core-actions-group">
+        <!-- Timestamp Button -->
+        <button id="btn-timestamp" class="action-btn action-btn-timestamp" title="Insert Timestamp link at cursor (T)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <circle cx="12" cy="12" r="10"></circle>
+            <polyline points="12 6 12 12 16 14"></polyline>
+          </svg>
+          <span>Timestamp</span>
+          <kbd>T</kbd>
+        </button>
+
+        <!-- Frame Capture Button -->
+        <button id="btn-capture" class="action-btn action-btn-capture" title="Snapshot Frame & Save to Obsidian (I)">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M23 19a2 2 0 0 1-2 2H3a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h4l2-3h6l2 3h4a2 2 0 0 1 2 2z"></path>
+            <circle cx="12" cy="13" r="4"></circle>
+          </svg>
+          <span>Capture</span>
+          <kbd>I</kbd>
+        </button>
+
+        <!-- AI Stream Notes Button -->
+        <button id="btn-ai-notes" class="action-btn action-btn-ai" title="Toggle Auto-Notes Continuous Lecture Watcher">
+          <div class="ai-sparkle-icon">
+            <svg viewBox="0 0 24 24" fill="currentColor">
+              <path d="M12 2L14.4 9.6L22 12L14.4 14.4L12 22L9.6 14.4L2 12L9.6 9.6L12 2Z"></path>
+            </svg>
+          </div>
+          <span id="ai-btn-text" class="ai-btn-text">AI Notes</span>
+          <span class="ai-lang-pill">EN</span>
+          <div id="ai-loading-spinner" class="spinner hidden"></div>
+        </button>
+      </div>
+    </footer>
+
+    <!-- Settings Modal -->
+    <div id="settings-modal" class="modal-backdrop hidden">
+      <div class="modal-card">
+        <div class="modal-header">
+          <div class="modal-title-group">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <circle cx="12" cy="12" r="3"></circle>
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+            </svg>
+            <h2>HoverNotes Settings</h2>
+          </div>
+          <button id="modal-close-btn" class="modal-close-btn" title="Close Settings">&times;</button>
+        </div>
+
+        <div class="modal-body">
+          <!-- Section 1: Obsidian Vault -->
+          <div class="settings-section">
+            <h3>Obsidian Local Vault Sync</h3>
+            <p class="section-desc">Connect directly to your local Obsidian vault folder. All notes and snapshots are saved natively as <code>HoverNotes/{Title}.md</code> and <code>HoverNotes/images/</code>.</p>
+            <div class="vault-sync-action-row">
+              <div class="vault-current-display">
+                <span class="vault-dot" id="modal-vault-dot"></span>
+                <span id="modal-vault-name">No Vault Connected</span>
+              </div>
+              <div class="vault-btn-group">
+                <button id="modal-connect-vault-btn" class="btn btn-secondary">Connect Vault</button>
+                <button id="modal-disconnect-vault-btn" class="btn btn-danger hidden">Disconnect</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Section 2: Gemini Multi-Key Multi-Account -->
+          <div class="settings-section">
+            <div class="section-title-badge">
+              <h3>Google Gemini Configuration</h3>
+              <span class="badge-gemini">Multi-Key Failover</span>
+            </div>
+            <p class="section-desc">Provide up to 3 Gemini API keys. If Key 1 hits a rate limit (HTTP 429) or quota limit (HTTP 403), HoverNotes automatically fails over to Key 2 and Key 3 seamlessly.</p>
+
+            <div class="input-field-group">
+              <div class="label-row">
+                <label for="gemini-model-select">Active Gemini Model</label>
+                <button type="button" id="refresh-models-btn" class="text-link-btn" title="Discover available models from Google API">↻ Refresh Models</button>
+              </div>
+              <select id="gemini-model-select" class="settings-select">
+                <option value="gemini-3.8-flash" selected>gemini-3.8-flash (Recommended)</option>
+              </select>
+            </div>
+
+            <div class="input-field-group">
+              <label for="gemini-key-1">Gemini API Key 1 (Primary)</label>
+              <div class="key-input-wrapper">
+                <input type="password" id="gemini-key-1" placeholder="AIzaSy..." spellcheck="false">
+                <button class="toggle-pwd-btn" data-target="gemini-key-1" title="Show/Hide Key">👁</button>
+              </div>
+            </div>
+
+            <div class="input-field-group">
+              <label for="gemini-key-2">Gemini API Key 2 (Backup Failover)</label>
+              <div class="key-input-wrapper">
+                <input type="password" id="gemini-key-2" placeholder="AIzaSy..." spellcheck="false">
+                <button class="toggle-pwd-btn" data-target="gemini-key-2" title="Show/Hide Key">👁</button>
+              </div>
+            </div>
+
+            <div class="input-field-group">
+              <label for="gemini-key-3">Gemini API Key 3 (Backup Failover)</label>
+              <div class="key-input-wrapper">
+                <input type="password" id="gemini-key-3" placeholder="AIzaSy..." spellcheck="false">
+                <button class="toggle-pwd-btn" data-target="gemini-key-3" title="Show/Hide Key">👁</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Section 3: Custom OpenAI-Compatible Fallback -->
+          <div class="settings-section">
+            <h3>Custom OpenAI-Compatible Fallback (Optional)</h3>
+            <p class="section-desc">Fallback endpoint for local or remote proxies (e.g. Kaggle Strata tunnel, vLLM, Ollama, OpenRouter).</p>
+
+            <div class="input-field-group">
+              <label for="custom-endpoint-url">Base URL</label>
+              <input type="text" id="custom-endpoint-url" placeholder="https://my-tunnel.loca.lt/v1" spellcheck="false">
+            </div>
+
+            <div class="input-row-2">
+              <div class="input-field-group">
+                <label for="custom-api-key">API Key (Optional)</label>
+                <div class="key-input-wrapper">
+                  <input type="password" id="custom-api-key" placeholder="sk-..." spellcheck="false">
+                  <button class="toggle-pwd-btn" data-target="custom-api-key" title="Show/Hide Key">👁</button>
+                </div>
+              </div>
+
+              <div class="input-field-group">
+                <label for="custom-model">Model Name</label>
+                <input type="text" id="custom-model" placeholder="gpt-4o-mini" value="gpt-4o-mini" spellcheck="false">
+              </div>
+            </div>
+          </div>
+
+          <!-- Feedback Status Toast -->
+          <div id="settings-status-box" class="settings-status-box hidden"></div>
+        </div>
+
+        <div class="modal-footer">
+          <button id="test-connection-btn" class="btn btn-secondary">Test Connection</button>
+          <button id="save-settings-btn" class="btn btn-primary">Save Settings</button>
+        </div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Scripts in dependency order -->
+  <script src="storage.js"></script>
+  <script src="transcript.js"></script>
+  <script src="gemini-client.js"></script>
+  <script src="sidebar.js"></script>
+</body>
+</html>

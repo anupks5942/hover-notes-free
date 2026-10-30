@@ -1,0 +1,213 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Connect Obsidian Vault - HoverNotes</title>
+  <style>
+    :root {
+      --bg-primary: #181822;
+      --bg-card: #20202e;
+      --border-color: #33334d;
+      --text-primary: #f1f5f9;
+      --text-secondary: #cbd5e1;
+      --text-muted: #8383a3;
+      --accent-purple: #7b68ee;
+      --accent-purple-light: #a882ff;
+      --color-green: #10b981;
+      --color-red: #ef4444;
+      --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      --font-mono: "JetBrains Mono", Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      font-family: var(--font-sans);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      padding: 24px;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    .picker-card {
+      background-color: var(--bg-card);
+      border: 1px solid var(--border-color);
+      border-radius: 14px;
+      padding: 28px;
+      width: 100%;
+      max-width: 440px;
+      text-align: center;
+      box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6);
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .brand-icon {
+      width: 52px;
+      height: 52px;
+      border-radius: 12px;
+      background: linear-gradient(135deg, rgba(123, 104, 238, 0.2), rgba(168, 130, 255, 0.35));
+      border: 1px solid var(--accent-purple);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: var(--accent-purple-light);
+      box-shadow: 0 0 18px rgba(123, 104, 238, 0.35);
+    }
+
+    .brand-icon svg {
+      width: 28px;
+      height: 28px;
+    }
+
+    h1 {
+      font-size: 18px;
+      font-weight: 700;
+      color: #ffffff;
+    }
+
+    p {
+      font-size: 13px;
+      color: var(--text-secondary);
+      line-height: 1.5;
+    }
+
+    .folder-info-box {
+      width: 100%;
+      background: rgba(255, 255, 255, 0.04);
+      border: 1px solid var(--border-color);
+      border-radius: 8px;
+      padding: 12px 14px;
+      text-align: left;
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .folder-info-box ul {
+      margin-top: 6px;
+      padding-left: 20px;
+      color: var(--text-muted);
+    }
+
+    .folder-info-box li {
+      margin: 3px 0;
+    }
+
+    .folder-info-box code {
+      font-family: var(--font-mono);
+      background: rgba(123, 104, 238, 0.15);
+      color: var(--accent-purple-light);
+      padding: 1px 4px;
+      border-radius: 3px;
+      font-size: 11px;
+    }
+
+    .btn-select {
+      width: 100%;
+      padding: 12px 20px;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      background: linear-gradient(135deg, #7b68ee 0%, #6366f1 100%);
+      color: #ffffff;
+      border: 1px solid var(--accent-purple-light);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      transition: all 0.2s ease;
+      box-shadow: 0 4px 14px rgba(123, 104, 238, 0.4);
+    }
+
+    .btn-select:hover {
+      background: linear-gradient(135deg, #8b7af0 0%, #7376f8 100%);
+      transform: translateY(-1px);
+      box-shadow: 0 6px 18px rgba(123, 104, 238, 0.55);
+    }
+
+    .btn-select:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+      transform: none;
+    }
+
+    .btn-select svg {
+      width: 18px;
+      height: 18px;
+    }
+
+    .status-msg {
+      width: 100%;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 12px;
+      line-height: 1.4;
+      text-align: left;
+    }
+
+    .status-msg.success {
+      background: rgba(16, 185, 129, 0.15);
+      border: 1px solid var(--color-green);
+      color: #34d399;
+    }
+
+    .status-msg.error {
+      background: rgba(239, 68, 68, 0.15);
+      border: 1px solid var(--color-red);
+      color: #f87171;
+    }
+
+    .status-msg.hidden {
+      display: none;
+    }
+
+    .footer-note {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+  </style>
+</head>
+<body>
+  <div class="picker-card">
+    <div class="brand-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"></path>
+        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"></path>
+        <polygon points="10,8 16,12 10,16" fill="currentColor" stroke="none"></polygon>
+      </svg>
+    </div>
+
+    <h1>Connect Obsidian Local Vault</h1>
+    <p>Select your Obsidian vault folder to enable personal notes and high-resolution snapshot synchronization.</p>
+
+    <div class="folder-info-box">
+      <strong>HoverNotes manages two folders in your vault:</strong>
+      <ul>
+        <li><code>HoverNotes/{Title}.md</code> - Note files with frontmatter</li>
+        <li><code>HoverNotes/images/</code> - High-res frame screenshots</li>
+      </ul>
+    </div>
+
+    <button id="btn-choose-vault" class="btn-select">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path>
+      </svg>
+      <span>Select Obsidian Vault Folder</span>
+    </button>
+
+    <div id="status-container" class="status-msg hidden"></div>
+
+    <div class="footer-note">Running in top-level extension window for permanent native permissions.</div>
+  </div>
+
+  <script src="vault-picker.js"></script>
+</body>
+</html>

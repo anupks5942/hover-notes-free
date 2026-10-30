@@ -1,0 +1,188 @@
+/* ==========================================================================
+   HoverNotes Clone - Content Styles
+   YouTube Split-Screen Video Mode and Injected Player Controls
+   ========================================================================== */
+
+/* Split-screen active state on YouTube */
+body.hovernotes-split-active {
+  overflow-x: hidden !important;
+  width: 100vw !important;
+  margin: 0 !important;
+  padding: 0 !important;
+}
+
+/* Constrain YouTube columns and primary container to 65vw */
+body.hovernotes-split-active ytd-app {
+  width: 65vw !important;
+  max-width: 65vw !important;
+  transition: width 0.2s ease, max-width 0.2s ease !important;
+}
+
+body.hovernotes-split-active #masthead-container {
+  width: 65vw !important;
+  max-width: 65vw !important;
+  transition: width 0.2s ease, max-width 0.2s ease !important;
+}
+
+body.hovernotes-split-active #page-manager {
+  margin-right: 0 !important;
+  max-width: 65vw !important;
+  width: 65vw !important;
+}
+
+body.hovernotes-split-active ytd-watch-flexy {
+  max-width: 65vw !important;
+  width: 65vw !important;
+  padding-right: 12px !important;
+  margin-right: 0 !important;
+  box-sizing: border-box !important;
+}
+
+body.hovernotes-split-active #columns {
+  max-width: 65vw !important;
+  width: 65vw !important;
+  flex-direction: column !important;
+}
+
+body.hovernotes-split-active #primary {
+  max-width: 65vw !important;
+  width: 65vw !important;
+  flex-grow: 1 !important;
+  padding-right: 0 !important;
+}
+
+body.hovernotes-split-active #player-container-outer,
+body.hovernotes-split-active #player-container,
+body.hovernotes-split-active #player {
+  max-width: 65vw !important;
+  width: 65vw !important;
+}
+
+body.hovernotes-split-active #secondary {
+  max-width: 65vw !important;
+  width: 65vw !important;
+}
+
+body.hovernotes-split-active .html5-video-player {
+  width: 100% !important;
+  height: 100% !important;
+}
+
+/* Fixed right-side iframe for HoverNotes Sidebar */
+#hovernotes-sidebar-iframe {
+  position: fixed !important;
+  top: 0 !important;
+  right: 0 !important;
+  width: 35vw !important;
+  height: 100vh !important;
+  z-index: 2147483647 !important;
+  border: none !important;
+  border-left: 1px solid #2d2d3f !important;
+  background-color: #181824 !important;
+  box-shadow: -8px 0 28px rgba(0, 0, 0, 0.65) !important;
+  transition: transform 0.25s cubic-bezier(0.16, 1, 0.3, 1), opacity 0.2s ease !important;
+  display: block !important;
+}
+
+#hovernotes-sidebar-iframe.hovernotes-hidden {
+  transform: translateX(100%) !important;
+  pointer-events: none !important;
+  opacity: 0 !important;
+}
+
+/* Injected Button in YouTube Player Controls (.ytp-right-controls) */
+.ytp-button.ytp-hovernotes-btn {
+  display: inline-flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+  text-align: center !important;
+  padding: 0 !important;
+  width: 44px !important;
+  height: 100% !important;
+  vertical-align: top !important;
+  cursor: pointer !important;
+  opacity: 0.85 !important;
+  position: relative !important;
+  transition: opacity 0.15s ease, transform 0.15s ease !important;
+}
+
+.ytp-button.ytp-hovernotes-btn:hover {
+  opacity: 1 !important;
+  transform: scale(1.08) !important;
+}
+
+.ytp-button.ytp-hovernotes-btn.active {
+  opacity: 1 !important;
+}
+
+.ytp-button.ytp-hovernotes-btn svg {
+  width: 24px !important;
+  height: 24px !important;
+  fill: #ffffff !important;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.5));
+}
+
+.ytp-button.ytp-hovernotes-btn.active svg {
+  fill: #a882ff !important;
+  filter: drop-shadow(0 0 6px #7b68ee) !important;
+}
+
+/* Native-styled YouTube Tooltip for HoverNotes Button */
+.ytp-hovernotes-tooltip {
+  position: absolute !important;
+  bottom: 56px !important;
+  left: 50% !important;
+  transform: translateX(-50%) !important;
+  background: rgba(28, 28, 28, 0.9) !important;
+  color: #fff !important;
+  padding: 5px 9px !important;
+  border-radius: 4px !important;
+  font-size: 11px !important;
+  font-weight: 500 !important;
+  letter-spacing: 0.2px !important;
+  white-space: nowrap !important;
+  pointer-events: none !important;
+  opacity: 0 !important;
+  transition: opacity 0.15s ease !important;
+  box-shadow: 0 2px 6px rgba(0,0,0,0.4) !important;
+  z-index: 1000 !important;
+}
+
+.ytp-button.ytp-hovernotes-btn:hover .ytp-hovernotes-tooltip {
+  opacity: 1 !important;
+}
+
+/* Floating fallback badge when not in standard watch controls */
+.hovernotes-floating-badge {
+  position: fixed !important;
+  bottom: 24px !important;
+  right: 24px !important;
+  z-index: 99999 !important;
+  display: flex !important;
+  align-items: center !important;
+  gap: 8px !important;
+  padding: 10px 16px !important;
+  background: linear-gradient(135deg, #2c2250 0%, #161622 100%) !important;
+  color: #ffffff !important;
+  border: 1px solid #7b68ee !important;
+  border-radius: 999px !important;
+  box-shadow: 0 6px 22px rgba(0, 0, 0, 0.55), 0 0 14px rgba(123, 104, 238, 0.35) !important;
+  cursor: pointer !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  letter-spacing: 0.3px !important;
+  user-select: none !important;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1) !important;
+}
+
+.hovernotes-floating-badge:hover {
+  transform: translateY(-2px) scale(1.04) !important;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.65), 0 0 20px rgba(168, 130, 255, 0.5) !important;
+  border-color: #a882ff !important;
+}
+
+.hovernotes-floating-badge svg {
+  width: 18px !important;
+  height: 18px !important;
+}
