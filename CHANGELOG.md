@@ -1,5 +1,21 @@
 # Changelog
 
+## v1.0.16 — Frame-helper fallback injection and non-fatal capture
+
+- Fix the service-worker recovery injection list: load `content/frame-quality.js` between the caption parser and `content.js`, matching the manifest's normal injection order.
+- Guard transcript-relevance and frame-deduplication helper calls so a missing helper cannot abort an AI note segment.
+- Make screenshot selection/capture non-fatal: if frame capture fails, continue generating transcript-grounded text notes and record the screenshot failure in diagnostics.
+- Add a regression test for dependency injection order, guarded helper access and screenshot-failure isolation.
+- Preserve Gemini model settings, all three existing API-key slots, prompt behaviour, generation cadence, Obsidian storage keys and vault-handle schema.
+
+## v1.0.15 — Markdown preview sanitization and Phase 0 baseline
+
+- Add a local allowlist sanitizer before rendered Markdown is inserted into the preview DOM.
+- Remove active HTML elements, event-handler attributes, arbitrary styles, unsafe URL schemes, and unapproved attributes from preview content.
+- Preserve ordinary Markdown formatting, code blocks, timestamp links, safe raster screenshot data URLs, same-extension assets, and LaTeX wrapper classes.
+- Add URL-policy unit tests and a browser regression fixture for malicious HTML, unsafe links, event handlers, SVG, iframe and script content.
+- Preserve the existing three Gemini key slots, `gemini-3.8-flash` primary, `gemini-3.5-flash-lite` fallback, local Obsidian directory handle, caption pipeline, prompts and generation cadence. No storage reset or migration is performed.
+
 ## v1.0.14 — Screenshot events interleaved within timestamped sections
 
 - Extract extension-managed screenshot heading/embed pairs before section sorting.

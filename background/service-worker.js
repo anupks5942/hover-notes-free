@@ -43,7 +43,7 @@ chrome.action.onClicked.addListener(async (tab) => {
       });
       await chrome.scripting.executeScript({
         target: { tabId: tab.id },
-        files: ['content/caption-parser.js', 'content/content.js']
+        files: ['content/caption-parser.js', 'content/frame-quality.js', 'content/content.js']
       });
       // Retry toggle message after injection
       setTimeout(() => {

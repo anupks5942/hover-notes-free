@@ -1,4 +1,4 @@
-## v1.0.14 in-section screenshot chronology checks
+## v1.0.16 in-section screenshot chronology checks
 
 - Normalize the exact observed note structure: `### [01:38]` parent section, timestamped bullets `[01:38–02:04]`, `[02:04–02:19]`, `[02:19–02:39]`, a nested `[01:41]` visual observation, and a legacy `### [01:41](URL)` plus image embed.
 - Confirm timestamped bullet blocks become `[01:38]`, `[01:41]`, `[02:04]`, `[02:19]` in that order; the earlier visual observation is no longer nested beneath a later bullet.
@@ -14,7 +14,7 @@ These tests must be run in Chrome with the existing connected Obsidian vault. Th
 
 ## Current four-minute live test
 
-1. Reload v1.0.14 from the same permanent unpacked extension directory and refresh the same YouTube lecture. Keep the existing vault connection; do not clear extension storage.
+1. Reload v1.0.16 from the same permanent unpacked extension directory and refresh the same YouTube lecture. Keep the existing vault connection; do not clear extension storage.
 2. Start the supplied KnowledgeGATE lecture at `00:00`, playback speed `2×`, and click **AI Notes**.
 3. At approximately `04:00`, pause YouTube first, click Stop, and wait until generation and saving finish.
 4. Export the single YouTube-tab Console log, generated Markdown, and all referenced screenshot files.

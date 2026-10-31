@@ -818,13 +818,29 @@
     return selected.join('\n');
   }
 
+  // Keep visual selection optional: AI text generation must continue even when
+  // a content-script fallback path has not loaded the frame-quality helper.
+  function getTranscriptRelevance(transcriptText) {
+    const analyzer = window.HoverNotesFrameQuality?.analyzeTranscriptRelevance;
+    if (typeof analyzer === 'function') return analyzer(transcriptText);
+    return {
+      isPromotional: false,
+      shouldSuppressFrames: false,
+      promotionalSignals: 0,
+      instructionalSignals: 0,
+      reason: 'transcript-relevance-helper-unavailable'
+    };
+  }
+
+  function areStudyFramesNearDuplicate(first, second, thresholds) {
+    const compare = window.HoverNotesFrameQuality?.areNearDuplicateFingerprints;
+    return typeof compare === 'function' ? compare(first, second, thresholds) : false;
+  }
+
   async function getBestStudyFrame(startTime, endTime, transcriptText = '') {
     const start = Math.max(0, Number(startTime) || 0);
     const end = Math.max(start, Number(endTime) || 0);
-    const relevance = window.HoverNotesFrameQuality?.analyzeTranscriptRelevance(transcriptText) || {
-      shouldSuppressFrames: false, promotionalSignals: 0, instructionalSignals: 0,
-      reason: 'transcript-relevance-unavailable'
-    };
+    const relevance = getTranscriptRelevance(transcriptText);
     if (relevance.shouldSuppressFrames) {
       const quality = {
         method: 'transcript-gated-slide-detail-occlusion-dhash-v3', isStudyRelevant: false,
@@ -843,7 +859,7 @@
       const candidateSecond = Math.floor(candidate.time);
       if (candidateSecond < start || candidateSecond > end || !candidate.quality?.isStudyRelevant) return false;
       const nearbyTranscript = extractTranscriptWindowNearTime(transcriptText, candidateSecond, 12);
-      const nearbyRelevance = window.HoverNotesFrameQuality.analyzeTranscriptRelevance(nearbyTranscript);
+      const nearbyRelevance = getTranscriptRelevance(nearbyTranscript);
       candidate.transcriptRelevance = nearbyRelevance;
       return !nearbyRelevance.shouldSuppressFrames;
     });
@@ -855,7 +871,7 @@
       const sampleTime = Number(video.currentTime);
       const quality = analyzeCurrentStudyFrame(video);
       const nearbyTranscript = extractTranscriptWindowNearTime(transcriptText, Math.floor(sampleTime), 12);
-      const nearbyRelevance = window.HoverNotesFrameQuality.analyzeTranscriptRelevance(nearbyTranscript);
+      const nearbyRelevance = getTranscriptRelevance(nearbyTranscript);
       quality.transcriptRelevance = nearbyRelevance;
       if (quality.isStudyRelevant && !nearbyRelevance.shouldSuppressFrames) {
         try {
@@ -874,7 +890,7 @@
       const fingerprint = candidate.quality?.fingerprint || '';
       if (!fingerprint) continue;
       const duplicatesSaved = usedStudyFrameFingerprints.some(used =>
-        window.HoverNotesFrameQuality.areNearDuplicateFingerprints(candidate.quality, used, {
+        areStudyFramesNearDuplicate(candidate.quality, used, {
           globalThreshold: STUDY_FRAME_DUPLICATE_DISTANCE,
           motionGlobalThreshold: STUDY_FRAME_MOTION_DUPLICATE_DISTANCE,
           regionThreshold: STUDY_FRAME_REGION_DUPLICATE_DISTANCE
@@ -882,7 +898,7 @@
       );
       if (duplicatesSaved) { duplicateOfSaved = true; continue; }
       const duplicatesCandidate = chosen.some(previous =>
-        window.HoverNotesFrameQuality.areNearDuplicateFingerprints(candidate.quality, previous.quality, {
+        areStudyFramesNearDuplicate(candidate.quality, previous.quality, {
           globalThreshold: STUDY_FRAME_DUPLICATE_DISTANCE,
           motionGlobalThreshold: STUDY_FRAME_MOTION_DUPLICATE_DISTANCE,
           regionThreshold: STUDY_FRAME_REGION_DUPLICATE_DISTANCE

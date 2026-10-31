@@ -1,6 +1,22 @@
-# HoverNotes Clone — Phase 1.0.14
+# My HoverNotes — Phase 1.0.16
 
-Build: 1.0.14
+Build: 1.0.16
+
+## v1.0.16 — Screenshot-path recovery fix
+
+The service-worker fallback injection now loads `content/frame-quality.js` before `content.js`. This matches the manifest's normal content-script dependency order. Frame-quality helper calls now fail safely, and a screenshot-selection error no longer prevents transcript-grounded AI notes from being generated. The failed screenshot is recorded in diagnostics while note generation continues.
+
+The existing three Gemini API-key slots, Gemini model configuration, prompts, generation interval, Obsidian vault handle and storage schema are preserved.
+
+# My HoverNotes — Phase 1.0.15
+
+Build: 1.0.15
+
+## v1.0.15 — Markdown preview sanitization and Phase 0 baseline
+
+The Markdown preview now parses generated HTML through a local allowlist sanitizer before inserting it into the UI. Active content such as scripts, frames, SVG/MathML, event-handler attributes, unsafe URL schemes, and arbitrary CSS attributes are removed. Safe Markdown formatting, timestamp links, raster screenshot data URLs, code classes and LaTeX containers are retained. No external runtime dependency is added.
+
+The existing caption retrieval, Gemini primary/fallback model selection, three-key configuration, note generation prompts, frame sampling, Obsidian folder handle and storage layout are unchanged.
 
 ## v1.0.14 — Timestamped screenshots interleaved inside topic sections
 

@@ -1,0 +1,37 @@
+My HoverNotes v1.0.16 — validation report
+=========================================
+
+Field-test diagnosis from v1.0.15
+---------------------------------
+- The uploaded Markdown file is 18 lines / 1,323 bytes and contains only the course-introduction segment, with the last timestamped text ending around 01:17.
+- The console records one successful generation segment: 00:00–01:19.
+- Gemini 3.8 Flash did not emit a first text token within 30 seconds. Gemini 3.5 Flash-Lite then completed the segment successfully.
+- From the next interval (01:19–pending), the console repeatedly reports:
+  "Cannot read properties of undefined (reading 'analyzeTranscriptRelevance')"
+- The scheduler repeatedly retries the same failed interval. The log has 40 error entries total: one primary-model first-token timeout and repeated frame-helper runtime failures.
+- The final run summary records generationCount=1, stopAt=15:00 and wallClockMs=452198 (~7m32s). This log therefore does not demonstrate a 20-minute wall-clock / 40-minute-video run.
+- The first interval had zero sampled/eligible screenshot candidates; no image embed was produced in the submitted Markdown.
+
+Root cause and corrective changes
+---------------------------------
+- Confirmed source defect: the manifest's normal YouTube content-script list loads frame-quality.js before content.js, but the service-worker action-click fallback injection omitted frame-quality.js.
+- Fixed fallback injection order:
+  caption-parser.js -> frame-quality.js -> content.js.
+- Guarded transcript relevance and perceptual deduplication helper access.
+- Made screenshot capture non-fatal to text generation. If screenshot selection/capture fails, the segment proceeds using transcript evidence and logs the screenshot failure rather than repeatedly failing the entire AI segment.
+- Existing Gemini settings, three key slots, AI prompts, cadence, storage keys and Obsidian vault-handle schema were not intentionally changed.
+
+Automated validation
+--------------------
+- 13 Node regression test scripts passed.
+- Four Markdown-sanitizer TAP subtests passed.
+- JavaScript syntax checks passed for all background, content and sidebar JavaScript files.
+- manifest.json parsed successfully.
+- ZIP integrity check passed.
+- Manual Chrome browser integration was not run here; the fallback injection and visual-capture degradation path still require the user's Chrome test.
+
+Install/configuration notes
+---------------------------
+- Keep the current extension folder path and existing extension card.
+- Back up the current folder, replace its files with the ZIP contents, click Reload, then refresh the YouTube tab.
+- Do not remove/reinstall the extension or clear extension storage. Existing three API key slots and the connected vault are held in Chrome extension storage/IndexedDB, not in the ZIP.

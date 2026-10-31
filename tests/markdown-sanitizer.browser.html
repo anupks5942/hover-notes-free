@@ -1,0 +1,38 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>HoverNotes Markdown sanitizer browser regression</title>
+<body>
+  <div id="result"></div>
+  <script src="../sidebar/markdown-sanitizer.js"></script>
+  <script>
+    (() => {
+      const unsafe = `
+        <p onclick="window.__xss = 'p'">Safe text <strong>bold</strong>
+          <img src="data:image/png;base64,AAAA" alt="slide" onerror="window.__xss='img'">
+        </p>
+        <script>window.__xss = 'script'<\/script>
+        <a href="javascript:window.__xss='href'" onmouseover="window.__xss='hover'">unsafe link</a>
+        <iframe src="https://attacker.example"></iframe>
+        <svg onload="window.__xss='svg'"><script>window.__xss='svg-script'<\/script></svg>
+        <div class="latex-block" style="background:url(javascript:alert(1))">$$x^2$$</div>
+        <a href="https://www.youtube.com/watch?v=abc&t=17" class="timestamp-link" data-seconds="17">00:17</a>
+      `;
+      const fragment = window.HoverNotesMarkdownSanitizer.sanitizeToFragment(unsafe);
+      document.getElementById('result').replaceChildren(fragment);
+      const root = document.getElementById('result');
+      const checks = {
+        scriptRemoved: root.querySelector('script') === null,
+        iframeRemoved: root.querySelector('iframe') === null,
+        svgRemoved: root.querySelector('svg') === null,
+        eventHandlersRemoved: root.querySelector('[onclick], [onerror], [onmouseover], [onload]') === null,
+        unsafeHrefRemoved: root.querySelector('a[href^="javascript:"]') === null,
+        safeImagePreserved: Boolean(root.querySelector('img[src^="data:image/png"]')),
+        safeTimestampPreserved: Boolean(root.querySelector('a.timestamp-link[data-seconds="17"]')),
+        styleRemoved: root.querySelector('[style]') === null,
+        latexPreserved: Boolean(root.querySelector('.latex-block'))
+      };
+      window.__sanitizerResults = checks;
+      document.body.dataset.testComplete = 'true';
+    })();
+  </script>
+</body>

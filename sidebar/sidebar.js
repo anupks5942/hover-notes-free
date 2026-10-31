@@ -797,15 +797,42 @@ tags: [hovernotes, gate-cs, study-notes]
       // Select a slide-like frame only when transcript context is not promotional.
       // Selection is passive; no seek/pause is performed by the sampler.
       stageStartedAt = perfNow();
-      frameData = await captureFrameData(endTime, {
-        selectBestStudyFrame: true, startTime, endTime,
-        transcriptText: sliceRes.transcriptText
-      });
-      report.stages.frameCaptureMs = elapsedMs(stageStartedAt);
-      const capturedFrameTime = Number.isFinite(frameData.seconds) ? Math.floor(frameData.seconds) : null;
-      includeCapturedFrame = Boolean(frameData.dataUrl && frameData.quality?.isStudyRelevant);
-      report.frameQuality = frameData.quality || null;
-      if (!includeCapturedFrame) report.screenshotSkipped = frameData.quality?.reason || 'No study-relevant frame was available in this interval.';
+      try {
+        frameData = await captureFrameData(endTime, {
+          selectBestStudyFrame: true, startTime, endTime,
+          transcriptText: sliceRes.transcriptText
+        });
+        report.stages.frameCaptureMs = elapsedMs(stageStartedAt);
+        const capturedFrameTime = Number.isFinite(frameData.seconds) ? Math.floor(frameData.seconds) : null;
+        includeCapturedFrame = Boolean(frameData.dataUrl && frameData.quality?.isStudyRelevant);
+        report.frameQuality = frameData.quality || null;
+        if (!includeCapturedFrame) report.screenshotSkipped = frameData.quality?.reason || 'No study-relevant frame was available in this interval.';
+        if (Number.isFinite(endTimeLimit)) {
+          const frozenBoundary = Math.floor(endTimeLimit);
+          // Keep transcript boundaries independent of the selected screenshot timestamp.
+          endTime = Math.min(endTime, frozenBoundary);
+          includeCapturedFrame = includeCapturedFrame && capturedFrameTime !== null && capturedFrameTime <= frozenBoundary;
+          if (frameData.dataUrl && capturedFrameTime !== null && capturedFrameTime > frozenBoundary) {
+            report.screenshotSkipped = 'The captured frame was after the frozen Stop boundary.';
+            console.warn('[HoverNotes AI] Screenshot omitted because capture occurred after Stop.', {
+              capturedFrameAt: formatTime(capturedFrameTime), stopBoundary: formatTime(frozenBoundary)
+            });
+          }
+        }
+      } catch (frameError) {
+        // A screenshot is an enhancement, never a prerequisite for transcript-
+        // grounded notes. Preserve the transcript interval and continue AI text.
+        report.stages.frameCaptureMs = elapsedMs(stageStartedAt);
+        frameData = { dataUrl: null, seconds: null, timestamp: null, quality: null };
+        includeCapturedFrame = false;
+        report.frameCaptureError = String(frameError?.message || frameError);
+        report.screenshotSkipped = 'Frame capture failed; text notes continued without a screenshot.';
+        console.warn('[HoverNotes AI] Frame capture failed; continuing without screenshot.', {
+          videoId: videoIdAtStart,
+          interval: `${formatTime(startTime)}–${formatTime(endTime)}`,
+          error: report.frameCaptureError
+        });
+      }
       if (Number.isFinite(endTimeLimit)) {
         const frozenBoundary = Math.floor(endTimeLimit);
         // Keep transcript boundaries independent of the selected screenshot timestamp.
@@ -1102,10 +1129,15 @@ tags: [hovernotes, gate-cs, study-notes]
         return;
       }
 
-      let parsedHtml = parseMarkdownToHtml(raw);
-      elements.notePreview.innerHTML = parsedHtml;
+      const parsedHtml = parseMarkdownToHtml(raw);
+      const sanitizer = window.HoverNotesMarkdownSanitizer;
+      if (!sanitizer || typeof sanitizer.sanitizeToFragment !== 'function') {
+        throw new Error('Markdown preview sanitizer is unavailable.');
+      }
+      const safeFragment = sanitizer.sanitizeToFragment(parsedHtml);
+      elements.notePreview.replaceChildren(safeFragment);
 
-      // Attach click listeners to all timestamp links to seek video
+      // Attach click listeners to sanitized timestamp links to seek video
       elements.notePreview.querySelectorAll('.timestamp-link').forEach((link) => {
         link.addEventListener('click', (e) => {
           e.preventDefault();
