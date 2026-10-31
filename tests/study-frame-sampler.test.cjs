@@ -28,6 +28,8 @@ assert.match(content, /STUDY_FRAME_DUPLICATE_DISTANCE = 10/);
 assert.match(content, /STUDY_FRAME_MOTION_DUPLICATE_DISTANCE = 25/);
 assert.match(content, /STUDY_FRAME_REGION_DUPLICATE_DISTANCE = 21/);
 assert.match(content, /areNearDuplicateFingerprints/);
+assert.match(content, /selectionScore/);
+assert.match(content, /upperSlideOcclusionRatio/);
 assert.match(content, /getBestStudyFrame\(startTime, endTime, transcriptText = ''\)/);
 assert.match(sidebar, /selectBestStudyFrame: true, startTime, endTime,[\s\S]*?transcriptText: sliceRes\.transcriptText/);
 assert.match(sidebar, /MARK_STUDY_FRAME_USED/);

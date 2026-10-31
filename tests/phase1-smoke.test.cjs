@@ -55,14 +55,16 @@ function sseResponse(body, status = 200) {
   const generated = await client.generateNotesStream({
     videoTitle: 'DSA lecture',
     currentTimestamp: '00:00–01:00',
-    transcriptChunk: '[00:10] Instructor explains a stack.',
+    transcriptChunk: '[01:39] The instructor explains why Data Structures and Algorithms require conceptual clarity and deep understanding, before moving to arrays, stacks, or queues.',
     existingNotes: '## Earlier section\n- Existing point',
     onChunk: () => {}
   });
   assert.match(generated, /Grounded notes/);
   assert.ok(requestHeaders['x-goog-api-key']);
   assert.ok(!requestUrl.includes('test-api-key'), 'API key must not appear in request URL');
-  assert.match(requestText, /Instructor explains a stack/);
+  assert.match(requestText, /why Data Structures and Algorithms require conceptual clarity/i);
+  assert.match(requestText, /CONTENT COVERAGE — DO NOT OMIT INSTRUCTIONAL FRAMING/i);
+  assert.match(requestText, /Do not omit a meaningful passage merely because a later segment will introduce formal definitions or operations/i);
   assert.match(requestText, /Earlier section/);
 
   let onErrorCalled = false;

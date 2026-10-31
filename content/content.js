@@ -756,8 +756,8 @@
       const pixels = context.getImageData(0, 0, canvas.width, canvas.height);
       return window.HoverNotesFrameQuality.analyzeRgbaPixels(pixels.data, pixels.width, pixels.height);
     } catch (error) {
-      return { method: 'edge-density-dhash-v2', isStudyRelevant: false, score: 0,
-        edgeDensity: 0, detailedTileCount: 0, fingerprint: '', reason: 'quality-check-unavailable' };
+      return { method: 'slide-detail-occlusion-dhash-v3', isStudyRelevant: false, score: 0, selectionScore: 0,
+        edgeDensity: 0, detailedTileCount: 0, upperSlideOcclusionRatio: 0, occlusionPenalty: 0, fingerprint: '', reason: 'quality-check-unavailable' };
     }
   }
 
@@ -771,7 +771,7 @@
       if (!quality.isStudyRelevant) return;
       const minuteBucket = Math.floor(sampleTime / 60);
       const previous = studyFrameCandidates.get(minuteBucket);
-      if (previous && previous.quality.score >= quality.score) return;
+      if (previous && (previous.quality.selectionScore ?? previous.quality.score) >= (quality.selectionScore ?? quality.score)) return;
       const dataUrl = await captureVideoFrame();
       if (!studyFrameSamplerActive || !dataUrl) return;
       studyFrameCandidates.set(minuteBucket, { time: sampleTime, dataUrl, quality, minuteBucket });
@@ -790,7 +790,7 @@
     studyFrameSamplerActive = true;
     studyFrameSamplingBusy = false;
     studyFrameSamplerTimer = setInterval(() => { void considerStudyFrame(getVideoElement()); }, 2500);
-    console.info('[HoverNotes Frames] Study-frame sampler started', { intervalMs: 2500, qualityMethod: 'edge-density-dhash-v2', duplicateDistance: STUDY_FRAME_DUPLICATE_DISTANCE, motionDuplicateDistance: STUDY_FRAME_MOTION_DUPLICATE_DISTANCE, regionDuplicateDistance: STUDY_FRAME_REGION_DUPLICATE_DISTANCE });
+    console.info('[HoverNotes Frames] Study-frame sampler started', { intervalMs: 2500, qualityMethod: 'slide-detail-occlusion-dhash-v3', duplicateDistance: STUDY_FRAME_DUPLICATE_DISTANCE, motionDuplicateDistance: STUDY_FRAME_MOTION_DUPLICATE_DISTANCE, regionDuplicateDistance: STUDY_FRAME_REGION_DUPLICATE_DISTANCE });
     return { success: true, active: true };
   }
 
@@ -827,7 +827,7 @@
     };
     if (relevance.shouldSuppressFrames) {
       const quality = {
-        method: 'transcript-gated-edge-density-dhash-v2', isStudyRelevant: false,
+        method: 'transcript-gated-slide-detail-occlusion-dhash-v3', isStudyRelevant: false,
         score: 0, fingerprint: '', transcriptRelevance: relevance,
         reason: 'promotional-segment-no-study-screenshot'
       };
@@ -867,7 +867,7 @@
       }
     }
 
-    matches.sort((a, b) => b.quality.score - a.quality.score || b.time - a.time);
+    matches.sort((a, b) => (b.quality.selectionScore ?? b.quality.score) - (a.quality.selectionScore ?? a.quality.score) || b.time - a.time);
     const chosen = [];
     let duplicateOfSaved = false;
     for (const candidate of matches) {
@@ -893,7 +893,7 @@
     }
     const best = chosen[0] || null;
     const quality = best?.quality || {
-      method: 'edge-density-dhash-v2', isStudyRelevant: false, score: 0, fingerprint: '',
+      method: 'slide-detail-occlusion-dhash-v3', isStudyRelevant: false, score: 0, selectionScore: 0, fingerprint: '',
       transcriptRelevance: relevance,
       reason: duplicateOfSaved ? 'duplicate-of-previously-saved-slide' : 'no-study-relevant-frame-found'
     };
@@ -903,7 +903,9 @@
       sampledCandidates: studyFrameCandidates.size, eligibleCandidates: matches.length,
       uniqueCandidates: chosen.length, previouslySavedDuplicate: duplicateOfSaved,
       selected: Boolean(best), selectedTime: best ? Number(best.time.toFixed(2)) : null,
-      qualityScore: best?.quality.score ?? null, qualityMethod: 'edge-density-dhash-v2',
+      qualityScore: best?.quality.score ?? null, selectionScore: best?.quality.selectionScore ?? best?.quality.score ?? null,
+      upperSlideOcclusionRatio: best?.quality.upperSlideOcclusionRatio ?? null, occlusionPenalty: best?.quality.occlusionPenalty ?? null,
+      qualityMethod: 'slide-detail-occlusion-dhash-v3',
       transcriptRelevance: relevance
     });
     return best ? { ...best, quality } : { dataUrl: null, time: null, quality };
@@ -1100,7 +1102,7 @@
               success: true, dataUrl: best?.dataUrl || null,
               frameTime: best?.time ?? null,
               frameQuality: best?.quality || {
-                method: 'edge-density-dhash-v2', isStudyRelevant: false, score: 0, fingerprint: '',
+                method: 'slide-detail-occlusion-dhash-v3', isStudyRelevant: false, score: 0, selectionScore: 0, fingerprint: '',
                 reason: 'no-study-relevant-frame-found'
               },
               videoState: state

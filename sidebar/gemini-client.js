@@ -28,7 +28,7 @@ NON-NEGOTIABLE GROUNDING RULES:
 2. Use the attached frame only for information visibly supported by that frame. Never infer unseen slide content, hidden steps, or spoken explanations from a still image.
 3. Do not invent examples, numerical values, equations, PYQs, definitions, claims, or instructor opinions. Preserve the instructor's actual values and method. If audio/transcript and frame appear inconsistent, say what is unclear rather than guessing.
 4. Translate Hindi/Hinglish into precise technical English while preserving the instructor's meaning, caveats, emphasis, and examples. Omit greetings, promotions, and unrelated banter; retain meaningful analogies.
-5. Cover the technical information in this segment without padding. Do not expand a brief mention into a full textbook explanation. Do not include a subject-specific formula unless it appears in the supplied evidence.
+5. Cover all substantive instructional content in this segment without padding. Instructional content includes technical facts and procedures, but also conceptual framing, why a subject or idea matters, learning objectives, the instructor's reasoning, distinctions between memorization and understanding, examples, analogies, and explanations of how ideas fit together. Do not require a formula, definition, or operation for a passage to count as educational content. Do not expand a brief mention into a full textbook explanation. Do not include a subject-specific formula unless it appears in the supplied evidence.
 6. Preserve important notation and equations. Use LaTeX only when the expression is present or unambiguously derivable from the supplied evidence. Do not fabricate complexity bounds.
 7. Clearly distinguish instructor material from uncertain extraction. Attribute the instructor's promises, guarantees, opinions, and personal claims explicitly (for example, ‘The instructor claims…’); do not present them as independently verified facts. Do not add practice questions or supplementary teaching unless explicitly requested.
 8. Use the timestamp range in the user message. Add concise timestamp anchors to major concepts when the transcript provides them.
@@ -37,7 +37,9 @@ NON-NEGOTIABLE GROUNDING RULES:
 11. Begin each major concept heading with its earliest supported transcript timestamp (for example, a heading like ### [01:39] Concept). Do not invent timestamps.
 12. Do not output screenshot headings, Obsidian image embeds, image paths, or Markdown image links. The extension inserts selected images itself.
 13. Do not repeat a definition or explanation already present in previous notes. When a concept is revisited, document only the genuinely new development.
-14. Output only the new Markdown section(s). Do not reproduce YAML frontmatter or the document title. If the segment contains no new technical content, output: <!-- No new technical content in this segment. -->`;
+14. If a slide and the instructor's speech present the same definition, combine them into one concise note and mention that the slide supports the spoken explanation; do not repeat the definition in a separate visual-observation section.
+15. Format time ranges consistently as [MM:SS–MM:SS] (or [HH:MM:SS–HH:MM:SS] when needed). Use only timestamps present in the transcript.
+16. Output only the new Markdown section(s). Do not reproduce YAML frontmatter or the document title. Use the no-content comment only when the interval contains no new substantive instructional learning—for example, only greetings, unrelated banter, administrative announcements, promotion, or exact repetition. Never use it merely because the interval contains no formula, definition, data-structure operation, or worked technical problem. A teacher's explanation of why DSA requires conceptual clarity and why students should understand the subject's purpose is meaningful instructional content and must be summarized when present.`;
   }
 
   // Load configuration from chrome.storage.local
@@ -224,13 +226,15 @@ NON-NEGOTIABLE GROUNDING RULES:
   // Remove extension-managed image blocks from previous-note context. The model
   // must not copy screenshot links; the extension owns screenshot insertion.
   sanitizePreviousNotes(markdown) {
-    const lines = String(markdown || '').split(/\r?\n/);
+    const lines = this.normalizeMarkdownBlockBoundaries(markdown).split(/\r?\n/);
     const output = [];
     for (let i = 0; i < lines.length; i++) {
       const isManagedImage = /^\s*!\[\[HoverNotes\/images\/[^\]]+\]\]\s*$/.test(lines[i]);
       if (isManagedImage) {
         const previous = output[output.length - 1] || '';
-        if (/^\s*###\s+\[[^\]]+\]\(https?:\/\/[^)]+\)\s*$/.test(previous)) output.pop();
+        // Both legacy screenshot headings and the current inline timestamp anchors
+        // belong to the extension; keep neither in Gemini's previous-note context.
+        if (/^\s*(?:###\s+)?(?:\*\*)?\[[^\]]+\]\(https?:\/\/[^)]+\)(?:\*\*)?\s*$/.test(previous)) output.pop();
         continue;
       }
       if (/^\s*!\[[^\]]*\]\([^)]*\)\s*$/.test(lines[i])) continue;
@@ -239,27 +243,321 @@ NON-NEGOTIABLE GROUNDING RULES:
     return output.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
 
-  // Sort major timestamped Markdown sections after generation. Streaming may
-  // briefly show model order, but the persisted note is normalized chronologically.
-  sortTimestampedSections(markdown) {
+  // Repair block boundaries that can be lost when a new streamed segment is
+  // appended immediately after an extension-owned screenshot embed or heading.
+  // This is deliberately narrow: it only separates managed image embeds and
+  // timestamped Markdown headings when they have been concatenated onto a line.
+  normalizeMarkdownBlockBoundaries(markdown) {
+    let text = String(markdown || '').replace(/\r\n?/g, '\n');
+    text = text.replace(
+      /(!\[\[HoverNotes\/images\/[^\]\n]+\]\])[ \t]*(?=\S)/g,
+      '$1\n\n'
+    );
+    text = text.replace(
+      /([^\n#])([ \t]*)(?=#{2,3}\s+\[(?:\d{1,2}:)?\d{2}:\d{2}\])/g,
+      '$1\n\n'
+    );
+    return text.replace(/\n{3,}/g, '\n\n');
+  }
+
+  normalizeTimestampFormatting(markdown) {
+    let text = this.normalizeMarkdownBlockBoundaries(markdown);
+    // Repair a known model formatting defect such as [00:00 - 0]:10] -> [00:00–00:10].
+    // Only this unambiguous malformed shape is rewritten; all other timestamps are preserved.
+    text = text.replace(/\[(\d{1,2}:\d{2})\s*[-–]\s*(\d{1,2})\]:(\d{2})\]/g, (_match, start, endMinutes, endSeconds) => {
+      const normalizedMinutes = String(Number(endMinutes)).padStart(2, '0');
+      return `[${start}–${normalizedMinutes}:${endSeconds}]`;
+    });
+    return text;
+  }
+
+  timestampToSeconds(value) {
+    const parts = String(value || '').split(':').map(part => Number(part));
+    if (parts.some(part => !Number.isFinite(part) || part < 0)) return Infinity;
+    if (parts.length === 2) return parts[0] * 60 + parts[1];
+    if (parts.length === 3) return parts[0] * 3600 + parts[1] * 60 + parts[2];
+    return Infinity;
+  }
+
+  deduplicateRepeatedDefinitionSentences(markdown) {
+    const seen = new Set();
+    // Match complete canonical definition sentences only. This deliberately avoids deleting
+    // a longer sentence whose later clause contains genuinely new lecture information.
+    const definitionPatterns = [
+      {
+        key: 'computer-science-definition',
+        pattern: /^computer\s+science\s+is\s+about\s+solving\s+problems\s+by\s+designing\s+algorithms(?:\s+that\s+can\s+be\s+converted\s+into\s+efficient\s+programs)?(?:\s*[,;:]?\s*(?:the\s+key\s+challenge\s+is\s+optimizing\s+for\s+)?time\s+and\s+memory)?[.!]?$/i
+      },
+      {
+        key: 'algorithm-definition',
+        pattern: /^an?\s+algorithm\s+is\s+a\s+systematic(?:,)?\s+step[- ]by[- ]step\s+(?:procedure|process)(?:\s+(?:for\s+solving\s+a\s+problem|that\s+can\s+be\s+translated\s+into\s+a\s+computer\s+program(?:\s+using\s+a\s+programming\s+language)?\s+and\s+executed\s+on\s+a\s+computer))?[.!]?$/i
+      },
+      {
+        key: 'efficient-program-equation',
+        pattern: /^efficient\s+program\s*=\s*data\s+structure\s*\+\s*algorithm[.!]?$/i
+      }
+    ];
+    return String(markdown || '').split(/\r?\n/).map(line => {
+      if (!line.trim() || /^\s*#{1,6}\s/.test(line) || /^\s*!\[\[/.test(line)) return line;
+      const sentences = line.match(/[^.!?]+[.!?]?/g) || [line];
+      const kept = [];
+      for (const sentence of sentences) {
+        const plain = sentence.replace(/[*_`]/g, '').replace(/^\s*[-*+]\s*/, '')
+          .replace(/^[^:]{1,90}:\s*/, '').replace(/\s+/g, ' ').trim();
+        const definition = definitionPatterns.find(item => item.pattern.test(plain));
+        if (!definition) { kept.push(sentence); continue; }
+        if (seen.has(definition.key)) continue;
+        seen.add(definition.key);
+        kept.push(sentence);
+      }
+      const result = kept.join('').trimEnd();
+      if (/^\s*[-*+]\s*(?:\*\*[^*]+\*\*\s*:?)?\s*$/.test(result)) return '';
+      return result;
+    }).join('\n').replace(/\n[ \t]*\n(?:[ \t]*\n)+/g, '\n\n');
+  }
+
+  // Extract extension-owned screenshot heading/embed pairs before sorting note content.
+  // A screenshot is an inline event inside its parent topic, not a peer section.
+  extractManagedScreenshotBlocks(markdown) {
+    const lines = this.normalizeMarkdownBlockBoundaries(markdown).split(/\r?\n/);
+    const removed = new Set();
+    const blocks = [];
+    const seenFiles = new Set();
+    const headingPattern = /^\s*(?:#{2,3}\s+)?(?:\*\*)?\[((?:\d{1,2}:)?\d{2}:\d{2})\]\((https?:\/\/[^)]+)\)(?:\*\*)?\s*$/;
+    const imagePattern = /^\s*!\[\[HoverNotes\/images\/([^\]]+)\]\]\s*$/;
+
+    for (let index = 0; index < lines.length; index++) {
+      const heading = lines[index].match(headingPattern);
+      if (!heading) continue;
+      let imageIndex = index + 1;
+      while (imageIndex < lines.length && !lines[imageIndex].trim() && imageIndex <= index + 2) imageIndex++;
+      if (imageIndex >= lines.length) continue;
+      const image = lines[imageIndex].match(imagePattern);
+      if (!image) continue;
+
+      const fileName = image[1];
+      if (!seenFiles.has(fileName)) {
+        blocks.push({
+          timestamp: heading[1],
+          seconds: this.timestampToSeconds(heading[1]),
+          url: heading[2],
+          fileName,
+          imageLine: `![[HoverNotes/images/${fileName}]]`,
+          originalIndex: blocks.length
+        });
+        seenFiles.add(fileName);
+      }
+      for (let removeIndex = index; removeIndex <= imageIndex; removeIndex++) removed.add(removeIndex);
+      index = imageIndex;
+    }
+
+    const body = lines.filter((_line, index) => !removed.has(index))
+      .join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    return { markdown: body, blocks };
+  }
+
+  // Model output can occasionally nest an earlier timestamped visual observation
+  // under a later bullet. Within each timestamped topic section, restore the
+  // timestamped bullet blocks to lecture order. Supporting lines stay with the
+  // timestamped bullet that precedes them.
+  sortTimestampedBulletBlocksWithinSections(markdown) {
     const lines = String(markdown || '').split(/\r?\n/);
+    const headingPattern = /^\s*#{2,3}\s+/;
+    const sectionRanges = [];
+    for (let index = 0; index < lines.length; index++) {
+      if (!headingPattern.test(lines[index])) continue;
+      let end = index + 1;
+      while (end < lines.length && !/^\s*#{1,3}\s+/.test(lines[end])) end++;
+      sectionRanges.push({ start: index, end });
+    }
+
+    // Work from the end so replacing one section cannot invalidate earlier ranges.
+    for (let rangeIndex = sectionRanges.length - 1; rangeIndex >= 0; rangeIndex--) {
+      const range = sectionRanges[rangeIndex];
+      const starts = [];
+      for (let index = range.start + 1; index < range.end; index++) {
+        const bullet = lines[index].match(/^(\s*)([-*+])\s+/);
+        if (!bullet) continue;
+        const timestamp = lines[index].match(/\[((?:\d{1,2}:)?\d{2}:\d{2})(?:\s*[–-]\s*((?:\d{1,2}:)?\d{2}:\d{2}))?\]/);
+        if (!timestamp) continue;
+        starts.push({
+          index,
+          seconds: this.timestampToSeconds(timestamp[1]),
+          indent: bullet[1].length,
+          originalIndex: starts.length
+        });
+      }
+      if (starts.length < 2) continue;
+      const isMonotonic = starts.every((item, index) => index === 0 || starts[index - 1].seconds <= item.seconds);
+      if (isMonotonic) continue;
+
+      const baseIndent = Math.min(...starts.map(item => item.indent));
+      const prefix = lines.slice(range.start, starts[0].index);
+      const blocks = starts.map((item, index) => ({
+        ...item,
+        lines: lines.slice(item.index, index + 1 < starts.length ? starts[index + 1].index : range.end)
+      }));
+      blocks.sort((a, b) => a.seconds - b.seconds || a.originalIndex - b.originalIndex);
+      const sortedBlocks = blocks.map(block => {
+        const blockLines = block.lines.slice();
+        // An out-of-order timestamped bullet is an independent lecture point;
+        // promote it to the section's common list indentation rather than leave
+        // it visually nested beneath a later topic.
+        blockLines[0] = blockLines[0].replace(/^\s*/, ' '.repeat(baseIndent));
+        return blockLines;
+      }).flat();
+      lines.splice(range.start, range.end - range.start, ...prefix, ...sortedBlocks);
+    }
+    return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  // Place a captured image inside the latest timestamped topic section at or before
+  // its capture time. Prefer an exact timestamped bullet, then a covering range,
+  // then the closest preceding bullet. Keep the image as an inline event (not a
+  // peer ### heading), so the parent topic remains structurally intact.
+  insertScreenshotIntoTimestampedSection(markdown, screenshot) {
+    const lines = String(markdown || '').split(/\r?\n/);
+    const sectionPattern = /^\s*#{2,3}\s+.*?\[((?:\d{1,2}:)?\d{2}:\d{2})(?:\s*[–-]\s*(?:\d{1,2}:)?\d{2}:\d{2})?\]/;
+    const anyHeadingPattern = /^\s*#{1,3}\s+/;
+    const target = Number(screenshot.seconds);
+    let sectionStart = -1;
+    let sectionTime = -Infinity;
+    for (let index = 0; index < lines.length; index++) {
+      const match = lines[index].match(sectionPattern);
+      if (!match) continue;
+      const seconds = this.timestampToSeconds(match[1]);
+      if (seconds <= target && seconds >= sectionTime) {
+        sectionStart = index;
+        sectionTime = seconds;
+      }
+    }
+
+    const anchor = `**[${screenshot.timestamp}](${screenshot.url})**`;
+    const screenshotBlock = `${anchor}\n${screenshot.imageLine}`;
+    if (sectionStart < 0) {
+      // No preceding topic section: preserve the legacy top-level timestamped
+      // screenshot behaviour, inserting it before the first later timestamped heading.
+      let insertAt = lines.length;
+      for (let index = 0; index < lines.length; index++) {
+        const match = lines[index].match(sectionPattern);
+        if (match && this.timestampToSeconds(match[1]) > target) { insertAt = index; break; }
+      }
+      const before = lines.slice(0, insertAt).join('\n').trimEnd();
+      const after = lines.slice(insertAt).join('\n').trimStart();
+      const topLevelBlock = `### [${screenshot.timestamp}](${screenshot.url})\n${screenshot.imageLine}`;
+      return [before, topLevelBlock, after].filter(Boolean).join('\n\n').replace(/\n{3,}/g, '\n\n');
+    }
+
+    let sectionEnd = lines.length;
+    for (let index = sectionStart + 1; index < lines.length; index++) {
+      if (anyHeadingPattern.test(lines[index])) { sectionEnd = index; break; }
+    }
+
+    const bulletPattern = /^(\s*)([-*+])\s+/;
+    const candidates = [];
+    for (let index = sectionStart + 1; index < sectionEnd; index++) {
+      if (!bulletPattern.test(lines[index])) continue;
+      const match = lines[index].match(/\[((?:\d{1,2}:)?\d{2}:\d{2})(?:\s*[–-]\s*((?:\d{1,2}:)?\d{2}:\d{2}))?\]/);
+      if (!match) continue;
+      candidates.push({
+        index,
+        start: this.timestampToSeconds(match[1]),
+        end: match[2] ? this.timestampToSeconds(match[2]) : this.timestampToSeconds(match[1])
+      });
+    }
+
+    let insertAt = sectionStart + 1;
+    if (candidates.length) {
+      const exact = candidates.find(item => item.start === target);
+      const covering = candidates.filter(item => item.start <= target && item.end >= target)
+        .sort((a, b) => b.start - a.start)[0];
+      const preceding = candidates.filter(item => item.start <= target).slice(-1)[0];
+      const following = candidates.find(item => item.start > target);
+      const chosen = exact || covering || preceding;
+      if (chosen) {
+        const nextCandidate = candidates.find(item => item.index > chosen.index);
+        insertAt = nextCandidate ? nextCandidate.index : sectionEnd;
+      } else if (following) {
+        insertAt = following.index;
+      }
+    }
+
+    const before = lines.slice(0, insertAt).join('\n').trimEnd();
+    const after = lines.slice(insertAt).join('\n').trimStart();
+    return [before, screenshotBlock, after].filter(Boolean).join('\n\n').replace(/\n{3,}/g, '\n\n');
+  }
+
+  // Sort timestamped topic sections, then timestamped teaching bullets within each
+  // section. Managed screenshots are extracted first and reinserted at their exact
+  // lecture position afterward; this prevents an image from being sorted after the
+  // entire parent section merely because it used to be represented as a heading.
+  sortTimestampedSections(markdown) {
+    const normalized = this.normalizeTimestampFormatting(markdown);
+    const extracted = this.extractManagedScreenshotBlocks(normalized);
+    const lines = extracted.markdown.split(/\r?\n/);
     const starts = [];
     const timestampPattern = /^\s*#{2,3}\s+.*?\[((?:\d{1,2}:)?\d{2}:\d{2})(?:\s*[–-]\s*(?:\d{1,2}:)?\d{2}:\d{2})?\]/;
     for (let index = 0; index < lines.length; index++) {
       const match = lines[index].match(timestampPattern);
       if (!match) continue;
-      const parts = match[1].split(':').map(Number);
-      const seconds = parts.length === 3 ? parts[0] * 3600 + parts[1] * 60 + parts[2] : parts[0] * 60 + parts[1];
-      starts.push({ index, seconds, originalIndex: starts.length });
+      starts.push({ index, seconds: this.timestampToSeconds(match[1]), originalIndex: starts.length });
     }
-    if (starts.length < 2) return lines.join('\n').trim();
-    const prefix = lines.slice(0, starts[0].index);
-    const blocks = starts.map((start, i) => ({
-      ...start,
-      lines: lines.slice(start.index, i + 1 < starts.length ? starts[i + 1].index : lines.length)
-    }));
-    blocks.sort((a, b) => a.seconds - b.seconds || a.originalIndex - b.originalIndex);
-    return [...prefix, ...blocks.flatMap(block => block.lines)].join('\n').replace(/\n{3,}/g, '\n\n').trim();
+    let sorted = lines.join('\n').trim();
+    if (starts.length >= 2) {
+      const prefix = lines.slice(0, starts[0].index);
+      const blocks = starts.map((start, index) => ({
+        ...start,
+        lines: lines.slice(start.index, index + 1 < starts.length ? starts[index + 1].index : lines.length)
+      }));
+      blocks.sort((a, b) => a.seconds - b.seconds || a.originalIndex - b.originalIndex);
+      sorted = [...prefix, ...blocks.flatMap(block => block.lines)].join('\n')
+        .replace(/\n{3,}/g, '\n\n').trim();
+    }
+
+    sorted = this.sortTimestampedBulletBlocksWithinSections(sorted);
+    const output = [];
+    const seenImages = new Set();
+    const sortedLines = sorted.split(/\r?\n/);
+    for (const line of sortedLines) {
+      const imageMatch = line.match(/^\s*!\[\[HoverNotes\/images\/([^\]]+)\]\]\s*$/);
+      if (imageMatch) {
+        if (seenImages.has(imageMatch[1])) continue;
+        seenImages.add(imageMatch[1]);
+      }
+      output.push(line);
+    }
+
+    let result = this.deduplicateRepeatedDefinitionSentences(output.join('\n'))
+      .replace(/\n{3,}/g, '\n\n').trim();
+    extracted.blocks.sort((a, b) => a.seconds - b.seconds || a.originalIndex - b.originalIndex);
+    for (const screenshot of extracted.blocks) {
+      result = this.insertScreenshotIntoTimestampedSection(result, screenshot);
+    }
+    return result.replace(/\n{3,}/g, '\n\n').trim();
+  }
+
+  normalizeNoteDocument(markdown) {
+    return this.sortTimestampedSections(this.normalizeMarkdownBlockBoundaries(this.normalizeTimestampFormatting(markdown)));
+  }
+
+  // Insert screenshot anchor+embed at its actual timestamp. Normalization extracts
+  // the temporary heading form and reinserts it inside the matching parent section.
+  insertTimestampedBlockChronologically(markdown, block, timestampSeconds) {
+    const current = this.normalizeTimestampFormatting(markdown);
+    const lines = current.split(/\r?\n/);
+    const target = Number(timestampSeconds);
+    const pattern = /^\s*#{2,3}\s+.*?\[((?:\d{1,2}:)?\d{2}:\d{2})(?:\s*[–-]\s*(?:\d{1,2}:)?\d{2}:\d{2})?\]/;
+    let insertAt = lines.length;
+    for (let index = 0; index < lines.length; index++) {
+      const match = lines[index].match(pattern);
+      if (!match) continue;
+      if (this.timestampToSeconds(match[1]) > target) { insertAt = index; break; }
+    }
+    const blockLines = String(block || '').trim().split(/\r?\n/);
+    const before = lines.slice(0, insertAt).join('\n').trimEnd();
+    const after = lines.slice(insertAt).join('\n').trimStart();
+    const inserted = [before, blockLines.join('\n'), after].filter(Boolean).join('\n\n');
+    return this.normalizeNoteDocument(inserted);
   }
 
   // Spec 4: Ultra-Fast SSE Stream Generator with Zero Thinking Delay & Multi-Key Failover
@@ -319,12 +617,21 @@ ${priorContext || '[No earlier notes in this run.]'}
 
 Create the new notes for this timestamp range only. Ground every factual statement in the transcript or visibly legible frame. Preserve the instructor's examples and numbers exactly. Never add generic GATE/DSA material to fill space. Do not label an AI-generated example as an instructor example. If there is insufficient evidence, write less rather than guess.
 
+CONTENT COVERAGE — DO NOT OMIT INSTRUCTIONAL FRAMING:
+- Preserve substantive teaching even when it is introductory or conceptual rather than a formula, formal definition, data-structure operation, or worked problem.
+- Summarize why the instructor says the subject matters, what students are expected to understand, why conceptual clarity/depth is needed, and how the upcoming material fits into problem-solving.
+- Distinguish educational explanation from course advertising. Omit only the promotional/administrative statements themselves; do not discard the educational explanation surrounding them.
+- Before returning the no-new-content comment, check whether the transcript contains any new rationale, learning objective, conceptual motivation, distinction, analogy, or instructor explanation. If it does, write a concise timestamped section instead.
+- Do not omit a meaningful passage merely because a later segment will introduce formal definitions or operations.
+
 CHRONOLOGY AND ASSET RULES:
 - Follow the transcript cue timestamps in strictly ascending order.
 - Put each major topic under a heading beginning with its earliest supported timestamp.
 - The attached frame was captured at ${frameBase64 && frameTimestamp ? frameTimestamp : 'an unspecified time'}; visual-only observations belong at that time, never earlier in the interval.
 - Never output image Markdown, Obsidian wiki-links, screenshot headings, image filenames, or copied previous-note media. The extension inserts selected screenshots after generation.
-- Do not restate definitions already covered in previous notes; add only new information from this interval.`;
+- Do not restate definitions already covered in previous notes; add only new information from this interval.
+- If a slide and the instructor's speech present the same definition, combine them into one concise note and mention that the slide supports the spoken explanation; do not repeat the definition in a separate visual-observation section.
+- Format time ranges consistently as [MM:SS–MM:SS] (or [HH:MM:SS–HH:MM:SS] when needed). Use only timestamps present in the transcript.`;
 
     const preferredModel = this.sessionPreferredModel || this.activeModel || this.primaryModel;
     const modelsToTry = [preferredModel, this.primaryModel, this.fallbackModel]

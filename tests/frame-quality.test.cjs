@@ -33,6 +33,26 @@ assert.equal(talkingHead.isStudyRelevant, false, 'low-detail talking-head frame 
 assert.equal(slide.isStudyRelevant, true, 'distributed high-contrast slide-like frame should be accepted');
 assert.ok(slide.score > talkingHead.score);
 assert.equal(invalid.reason, 'insufficient-image-data');
+
+// Foreground-occlusion proxy should reduce selection priority without rejecting a useful slide.
+const obstructedPixels = createFrame(width, height, true);
+for (let y = 12; y < 92; y++) {
+  for (let x = 8; x < 92; x++) {
+    const offset = (y * width + x) * 4;
+    obstructedPixels[offset] = 190;
+    obstructedPixels[offset + 1] = 130;
+    obstructedPixels[offset + 2] = 100;
+    obstructedPixels[offset + 3] = 255;
+  }
+}
+const obstructedSlide = analyzeRgbaPixels(obstructedPixels, width, height);
+assert.equal(obstructedSlide.isStudyRelevant, true,
+  'an otherwise useful slide remains eligible when the foreground proxy detects obstruction');
+assert.ok(obstructedSlide.upperSlideOcclusionRatio > 0,
+  'skin-like foreground pixels in the upper-left slide area are measured');
+assert.ok(obstructedSlide.selectionScore < slide.selectionScore,
+  'a more obstructed frame receives a lower selection score');
+assert.ok(obstructedSlide.occlusionPenalty > 0);
 const slideAt238 = {
   fingerprint: '33ca1696b7352535',
   regionFingerprints: ['1502010047cd0102', '5f1e3ab5bcbcb4b8', 'd6eac9add5a5dbaa', '3c34797b72353731']

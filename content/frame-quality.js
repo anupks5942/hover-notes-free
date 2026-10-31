@@ -112,11 +112,40 @@
     };
   }
 
+  // Estimate presenter/foreground obstruction from warm skin-like pixels in the
+  // upper-left slide area. This is deliberately a ranking penalty, NOT face
+  // detection: photographs/illustrations can also contain skin tones. The
+  // sampler prefers a clearer candidate when one exists, but does not reject a
+  // frame solely on this estimate.
+  function estimateUpperSlideOcclusion(pixels, width, height) {
+    if (!pixels || width < 8 || height < 8 || pixels.length < width * height * 4) {
+      return { ratio: 0, penalty: 0 };
+    }
+    const regionRight = Math.max(1, Math.floor(width * 0.78));
+    const regionBottom = Math.max(1, Math.floor(height * 0.62));
+    let skinLike = 0;
+    const total = regionRight * regionBottom;
+    for (let y = 0; y < regionBottom; y++) {
+      for (let x = 0; x < regionRight; x++) {
+        const offset = (y * width + x) * 4;
+        const r = pixels[offset], g = pixels[offset + 1], b = pixels[offset + 2];
+        const max = Math.max(r, g, b), min = Math.min(r, g, b);
+        if (r > 95 && g > 40 && b > 20 && r > g && r > b && r - g > 15 && max - min > 15) {
+          skinLike++;
+        }
+      }
+    }
+    const ratio = total ? skinLike / total : 0;
+    // At 8% estimated coverage the candidate loses ~32 points. It remains
+    // eligible; selection can still use it when no clearer frame is available.
+    return { ratio: Math.round(ratio * 10000) / 10000, penalty: Math.min(45, Math.round(ratio * 400)) };
+  }
+
   function analyzeRgbaPixels(pixels, width, height) {
     if (!pixels || !Number.isInteger(width) || !Number.isInteger(height) ||
         width < 8 || height < 8 || pixels.length < width * height * 4) {
-      return { method: 'edge-density-dhash-v2', isStudyRelevant: false, score: 0,
-        edgeDensity: 0, detailedTileCount: 0, fingerprint: '', reason: 'insufficient-image-data' };
+      return { method: 'slide-detail-occlusion-dhash-v3', isStudyRelevant: false, score: 0, selectionScore: 0,
+        edgeDensity: 0, detailedTileCount: 0, upperSlideOcclusionRatio: 0, occlusionPenalty: 0, fingerprint: '', reason: 'insufficient-image-data' };
     }
     const luminance = new Uint8Array(width * height);
     for (let i = 0, p = 0; i < luminance.length; i++, p += 4) {
@@ -146,17 +175,21 @@
     }
     const isStudyRelevant = edgeDensity >= 0.055 && detailedTileCount >= 5;
     const score = Math.max(0, Math.min(100, Math.round((edgeDensity / 0.12) * 70 + (detailedTileCount / 12) * 30)));
+    const obstruction = estimateUpperSlideOcclusion(pixels, width, height);
+    const selectionScore = Math.max(0, score - obstruction.penalty);
     return {
-      method: 'edge-density-dhash-v2', isStudyRelevant, score,
+      method: 'slide-detail-occlusion-dhash-v3', isStudyRelevant, score, selectionScore,
       edgeDensity: Math.round(edgeDensity * 10000) / 10000,
       detailedTileCount,
+      upperSlideOcclusionRatio: obstruction.ratio,
+      occlusionPenalty: obstruction.penalty,
       fingerprint: fingerprintRgbaPixels(pixels, width, height),
       regionFingerprints: fingerprintRegionsRgbaPixels(pixels, width, height),
       reason: isStudyRelevant ? 'sufficient-distributed-visual-detail' : 'low-slide-like-visual-detail'
     };
   }
 
-  const api = { analyzeRgbaPixels, analyzeTranscriptRelevance, fingerprintRgbaPixels, fingerprintRegionsRgbaPixels, hammingDistanceHex, areNearDuplicateFingerprints };
+  const api = { analyzeRgbaPixels, analyzeTranscriptRelevance, estimateUpperSlideOcclusion, fingerprintRgbaPixels, fingerprintRegionsRgbaPixels, hammingDistanceHex, areNearDuplicateFingerprints };
   if (typeof globalThis !== 'undefined') globalThis.HoverNotesFrameQuality = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })();

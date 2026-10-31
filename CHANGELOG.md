@@ -1,5 +1,39 @@
 # Changelog
 
+## v1.0.14 — Screenshot events interleaved within timestamped sections
+
+- Extract extension-managed screenshot heading/embed pairs before section sorting.
+- Sort timestamped instructional bullet blocks within their parent topic so an earlier visual observation cannot remain nested beneath later lecture content.
+- Reinsert each screenshot as an inline timestamp anchor and Obsidian embed immediately after its matching timestamped teaching point (or the closest supported point).
+- Preserve legacy top-level screenshot placement when no preceding timestamped topic section exists.
+- Extend previous-note sanitization to remove both legacy screenshot headings and inline timestamp anchors.
+- Preserve v1.0.13 Gemini timeout/fallback, caption retrieval, screenshot quality filtering, and Stop behaviour.
+- Bump manifest, sidebar UI, README, VERSION.txt and changelog to `1.0.14`.
+- Add an exact regression fixture for the v1.0.13 `[01:38]` parent section / `[01:41]` screenshot / `[02:04]` bullet chronology defect.
+
+## 1.0.13 — Markdown block integrity and instructional coverage
+
+- Fixes Markdown assembly when a new streamed segment starts directly after a screenshot embed or timestamped heading; inserts and validates blank-line boundaries before persistence.
+- Applies the same block-boundary normalization before previous-note sanitization, so concatenated screenshot embeds cannot leak into later Gemini context.
+- Strengthens the system and per-segment prompts to retain meaningful conceptual framing, why a subject matters, learning objectives, instructor rationale, analogies, and distinctions between memorization and understanding—even when no formula or formal operation is taught.
+- Restricts the no-new-content comment to intervals without new substantive instructional learning, rather than using absence of a formula/definition as a proxy for absence of learning.
+- Adds regression tests for the exact live Markdown concatenation failures and the transcript's early DSA conceptual discussion.
+- Preserves v1.0.12 screenshot relevance heuristics, promotional filtering, perceptual deduplication, 30-second Gemini first-token timeout/fallback, 300-second segment size, Stop boundary, and the large-caption player bridge.
+- Bumps manifest, sidebar UI, README, VERSION.txt and changelog to `1.0.13`.
+- Automated tests verify deterministic formatting and prompt rules; only another live run can validate model-level content coverage.
+
+## 1.0.12 — Obstruction-aware frame ranking and chronological note assembly
+
+- Preserves the v1.0.11 transcript-based promotional gate and perceptual duplicate detection.
+- Adds a local warm-tone foreground-occlusion proxy over the upper-left slide area. It reduces a candidate's selection score when skin-like foreground pixels obscure likely slide content, while retaining eligibility so a frame is not discarded solely by this imperfect color heuristic. This is not face detection, OCR, or semantic vision.
+- Uses the obstruction-adjusted selection score both when retaining the best frame per minute and when choosing the best frame for a transcript interval. Logs include the estimated ratio and penalty for live calibration.
+- Inserts screenshot anchors and Obsidian embeds at their actual timestamp in the Markdown rather than appending them at the end. The complete note is normalized before persistence so timestamped concept sections and screenshot blocks are chronologically ordered.
+- Removes exact duplicate extension-managed image embeds and repeated canonical statements for the computer-science definition, algorithm definition, and efficient-program relationship while preserving other sentences on the same bullet.
+- Repairs only the known unambiguous malformed timestamp range form (`[00:00 - 0]:10]`), and tightens the prompt to merge a slide definition with the instructor's verbal restatement rather than repeating it.
+- Adds regression tests for foreground-obstruction ranking, timestamp-range repair, chronological screenshot insertion, duplicate image embeds, and repeated definitions. Existing Gemini 30-second fallback, promotional suppression, duplicate-frame detection, Stop behavior, 300-second chunking and large caption bridge are retained.
+- Local tests cannot prove that a selected frame is semantically educational or fully unobstructed. A live Chrome smoke test is required.
+- Bumps manifest, sidebar UI, README, VERSION.txt and changelog to `1.0.12`.
+
 ## 1.0.11 — Transcript-aware screenshot gating, slide deduplication and chronological note guidance
 
 - Keeps the v1.0.10 30-second Gemini first-token timeout, sticky session fallback model, and model-specific generation configuration unchanged.

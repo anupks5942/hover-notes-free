@@ -25,7 +25,16 @@ assert.match(source, /report\.outcome === 'saved' \|\| report\.outcome === 'no-n
 assert.match(source, /scheduleMarkdownPreviewRender\(\)/);
 assert.match(source, /frameTimestamp: seg === segmentCount - 1 && includeCapturedFrame \? frameData\.timestamp : null/);
 assert.match(source, /sanitizePreviousNotes\(generated\)/, 'model-emitted managed screenshot blocks must be removed before note persistence');
+
+assert.match(source, /let segmentStreamStarted = false/);
+assert.match(source, /if \(!segmentStreamStarted && String\(chunkText \|\| ''\)\.length > 0\)/,
+  'each generated segment must insert a Markdown block boundary before its first streamed text');
+assert.ok(source.includes("appendTextToEnd(current.endsWith('\\n') ? '\\n' : '\\n\\n')"),
+  'the first chunk must be prefixed with a newline boundary when the document does not already end with a blank line');
+
 assert.match(source, /sortTimestampedSections\(/, 'generated timestamped sections must be sorted before persistence');
+assert.match(source, /insertTimestampedBlockChronologically\(/, 'screenshot embeds must be inserted at their actual timestamp');
+assert.match(source, /normalizeNoteDocument\(elements\.noteEditor\.value\)/, 'the complete note must be normalized before save');
 assert.match(source, /regionFingerprints: frameData\.quality\.regionFingerprints/);
 assert.match(source, /}, 150\)/, 'streamed Markdown preview is batched at 150ms');
 assert.match(source, /flushMarkdownPreviewRender\(\)/);

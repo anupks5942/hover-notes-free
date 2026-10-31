@@ -453,8 +453,12 @@ tags: [hovernotes, gate-cs, study-notes]
     state.imageCache.set(`images/${fileName}`, frameData.dataUrl);
     state.imageCache.set(`HoverNotes/images/${fileName}`, frameData.dataUrl);
     const separator = videoUrl.includes('?') ? '&' : '?';
-    const embedBlock = `\n\n### [${frameData.timestamp}](${videoUrl}${separator}t=${frameData.seconds}s)\n${markdownLink}\n\n`;
-    appendTextToEnd(embedBlock);
+    const embedBlock = `### [${frameData.timestamp}](${videoUrl}${separator}t=${frameData.seconds}s)\n${markdownLink}`;
+    elements.noteEditor.value = window.geminiClient.insertTimestampedBlockChronologically(
+      elements.noteEditor.value, embedBlock, frameData.seconds
+    );
+    scheduleMarkdownPreviewRender();
+    if (!state.isGeneratingAI) scheduleAutoSave();
     return { fileName, dataUrl: frameData.dataUrl, markdownLink, seconds: frameData.seconds, timestamp: frameData.timestamp };
   }
 
@@ -853,6 +857,7 @@ tags: [hovernotes, gate-cs, study-notes]
         const priorNotes = elements.noteEditor.value.slice(-12000);
         const geminiStartedAt = perfNow();
         let generated = '';
+        let segmentStreamStarted = false;
         try {
           generated = await window.geminiClient.generateNotesStream({
             videoTitle: title,
@@ -872,7 +877,16 @@ tags: [hovernotes, gate-cs, study-notes]
                 ...event
               });
             },
-            onChunk: (chunkText) => appendTextToEnd(chunkText),
+            onChunk: (chunkText) => {
+              if (!segmentStreamStarted && String(chunkText || '').length > 0) {
+                const current = elements.noteEditor.value;
+                if (current.trim() && !/\n{2}$/.test(current)) {
+                  appendTextToEnd(current.endsWith('\n') ? '\n' : '\n\n');
+                }
+                segmentStreamStarted = true;
+              }
+              appendTextToEnd(chunkText);
+            },
             onComplete: () => appendTextToEnd('\n\n')
           });
         } finally {
@@ -916,6 +930,9 @@ tags: [hovernotes, gate-cs, study-notes]
       }
       if (signal.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
 
+      // Normalize the complete document, not merely the latest AI response: this keeps
+      // screenshot anchors, concept headings and repeated core definitions in one order.
+      elements.noteEditor.value = window.geminiClient.normalizeNoteDocument(elements.noteEditor.value);
       stageStartedAt = perfNow();
       flushMarkdownPreviewRender();
       report.stages.finalPreviewRenderMs = elapsedMs(stageStartedAt);
