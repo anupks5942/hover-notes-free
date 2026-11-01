@@ -1,0 +1,29 @@
+My HoverNotes v1.0.17 — automated validation report
+====================================================
+
+Implemented
+-----------
+- Added a final AI synthesis pass after the successful final interval flush, and also when Stop is pressed with no unprocessed interval remaining.
+- Added a dedicated prompt to reorganize segment drafts by topic in the observable editorial style of the supplied HoverNotes Markdown reference.
+- Preserved existing YAML frontmatter and the H1 title verbatim during synthesis. New notes use a HoverNotes-like title/author/source/created/tags metadata shape. Description and transcript-link fields are not generated because the current capture pipeline does not supply those values/files.
+- Protected extension-managed screenshot timestamp links and Obsidian embeds using deterministic tokens; restored each asset once after synthesis and recovered dropped tokens under a Visual References section.
+- Added output validation for minimum output length, topic headings and balanced fenced code/diagram blocks.
+- If synthesis fails or looks truncated, the already-saved incremental draft remains available.
+- If the user edits the document while synthesis is running, the finalizer does not overwrite that edit and saves the user's current draft.
+- Added a 60,000-character input bound. Larger drafts skip final synthesis and retain their incremental notes; hierarchical multi-pass synthesis is not implemented in this release.
+- Existing Gemini keys, models, fallback behaviour, caption retrieval, frame sampling and Obsidian storage/permission handles are retained.
+
+Automated validation
+--------------------
+- All 15 Node regression test scripts passed.
+- Four Markdown sanitizer TAP subtests passed (included in the test-script total above).
+- `node --check` passed for all 12 JavaScript files in background/, content/ and sidebar/.
+- manifest.json parsed successfully.
+- Browser/Chrome/Obsidian integration was not run in this environment.
+
+Not verified by automated tests
+-------------------------------
+- Live Gemini adherence to the target style, completeness, factual accuracy or diagram quality.
+- Live Chrome/YouTube/Obsidian integration and final synthesis latency.
+- Hierarchical long-lecture synthesis above the 60,000-character limit.
+- Graphical Mermaid rendering inside the extension's compact preview. Mermaid source is saved to Markdown for Obsidian rendering.

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "HoverNotes Clone",
-  "version": "1.0.16",
-  "description": "Transcript-grounded YouTube notes with performance diagnostics and local Obsidian saving.",
+  "version": "1.0.25",
+  "description": "Topic-organized AI study notes from YouTube lectures with local Obsidian saving.",
   "icons": {
     "16": "icons/icon16.png",
     "48": "icons/icon48.png",

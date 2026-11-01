@@ -308,17 +308,7 @@
     }
 
     // Initialize clean note template with frontmatter
-    const initialFrontmatter = `---
-title: "${targetTitle.replace(/"/g, "'")}"
-source: "${state.videoState.videoUrl || window.location.href}"
-channel: "${state.videoState.channelName || 'YouTube'}"
-date: "${new Date().toISOString().substring(0, 19).replace('T', ' ')}"
-tags: [hovernotes, gate-cs, study-notes]
----
-
-# ${targetTitle}
-
-`;
+    const initialFrontmatter = createFreshNoteTemplate(targetTitle);
 
     elements.noteEditor.value = initialFrontmatter;
     renderMarkdownPreview();
@@ -505,12 +495,17 @@ tags: [hovernotes, gate-cs, study-notes]
 
   function createFreshNoteTemplate(title) {
     const safeTitle = String(title || 'Untitled Video Note').replace(/"/g, "'");
+    const metadataTitle = `${safeTitle} - YouTube`;
+    const description = String(state.videoState.videoDescription || '').trim().slice(0, 4000);
+    const descriptionField = description ? `description: ${JSON.stringify(description)}\n` : '';
     return `---
-title: "${safeTitle}"
+title: "${metadataTitle}"
+${descriptionField}author: YouTube
 source: "${state.videoState.videoUrl || window.location.href}"
-channel: "${state.videoState.channelName || 'YouTube'}"
-date: "${new Date().toISOString().substring(0, 19).replace('T', ' ')}"
-tags: [hovernotes, gate-cs, study-notes]
+created: "${new Date().toISOString().substring(0, 10)}"
+tags:
+  - hover-notes
+  - youtube
 ---
 
 # ${safeTitle}
@@ -646,6 +641,142 @@ tags: [hovernotes, gate-cs, study-notes]
     }
   }
 
+  async function synthesizeFinalStudyNote({ videoId, videoTitle, stopTime, signal, report }) {
+    const synthesisTools = window.HoverNotesNoteSynthesis;
+    if (!synthesisTools) {
+      report.finalSynthesis = { outcome: 'failed', reason: 'The note-synthesis helper did not load.' };
+      return false;
+    }
+    const snapshot = elements.noteEditor.value;
+    const parts = synthesisTools.splitDocument(snapshot);
+    if (!parts.body || parts.body.length < 100) {
+      report.finalSynthesis = { outcome: 'skipped', reason: 'Not enough generated note content to finalize.' };
+      return false;
+    }
+
+    const protectedAssets = synthesisTools.protectManagedScreenshotBlocks(parts.body);
+    const synthesisStartedAt = perfNow();
+    elements.aiStatusText.textContent = 'Rebuilding final notes from the full transcript…';
+    showSaveStatus('Preparing source-grounded study notes…', false, true);
+
+    try {
+      // Critical change: retrieve the complete original transcript through the
+      // frozen Stop boundary. Incremental AI summaries are no longer the factual
+      // source for final synthesis because they may already have lost details.
+      const sourceStartedAt = perfNow();
+      const sourceResult = await sendBridgeMessage('GET_TRANSCRIPT_SLICE', {
+        startTime: 0,
+        endTime: Math.max(0, Math.floor(stopTime || 0))
+      });
+      const sourceRetrievalMs = elapsedMs(sourceStartedAt);
+      if (!sourceResult?.success || !Array.isArray(sourceResult.lines) || !sourceResult.lines.length || !sourceResult.transcriptText?.trim()) {
+        throw new Error(sourceResult?.error || sourceResult?.diagnostic || 'The complete transcript could not be retrieved. The incremental draft was retained.');
+      }
+      if (signal?.aborted || videoId !== state.currentVideoId) {
+        report.finalSynthesis = { outcome: 'cancelled', sourceRetrievalMs };
+        return false;
+      }
+
+      const generated = await window.geminiClient.synthesizeStudyDocument({
+        videoTitle,
+        stopTime: formatTime(stopTime || 0),
+        sourceTranscript: sourceResult.transcriptText,
+        videoDescription: state.videoState.videoDescription || '',
+        supplementaryVisualNotes: synthesisTools.extractVisualContext(protectedAssets.markdown, protectedAssets.assets, 16000),
+        visualAssets: protectedAssets.assets.map(asset => {
+          const imageMatch = String(asset.imageLine || '').match(/!\[\[(?:HoverNotes\/)?images\/([^\]]+)\]\]/);
+          const fileName = imageMatch?.[1] || '';
+          const imageDataUrl = fileName
+            ? (state.imageCache.get(fileName) || state.imageCache.get(`images/${fileName}`) || state.imageCache.get(`HoverNotes/images/${fileName}`) || null)
+            : null;
+          return {
+            token: asset.token,
+            timestamp: asset.timestamp,
+            imageLine: asset.imageLine,
+            dataUrl: imageDataUrl
+          };
+        }),
+        signal,
+        onDiagnostics: event => {
+          report.finalSynthesisAttempts = report.finalSynthesisAttempts || [];
+          report.finalSynthesisAttempts.push(event);
+          console.info('[HoverNotes Performance] Final synthesis attempt', {
+            videoId,
+            stopAt: formatTime(stopTime || 0),
+            ...event
+          });
+        }
+      });
+
+      const normalizedSourceLength = synthesisTools.normalizeTranscriptForAI(sourceResult.transcriptText).length;
+      const validation = synthesisTools.validateOutput(generated, normalizedSourceLength, {
+        minimumRatio: 0.08,
+        minimumCharacters: Math.min(700, Math.max(250, Math.floor(normalizedSourceLength * 0.3))),
+        minimumHeadings: normalizedSourceLength >= 1200 ? 2 : 1
+      });
+      if (!validation.valid) throw new Error(validation.reason);
+      const restoredBody = synthesisTools.restoreManagedScreenshotBlocks(validation.markdown, protectedAssets.assets);
+      const finalDocument = `${parts.preamble}\n\n${restoredBody}\n`;
+
+      if (signal?.aborted || videoId !== state.currentVideoId) {
+        report.finalSynthesis = { outcome: 'cancelled', sourceRetrievalMs };
+        return false;
+      }
+
+      // A user can still edit while synthesis runs. Never replace their work if
+      // the document changed after the source/draft snapshot was taken.
+      if (elements.noteEditor.value !== snapshot) {
+        report.finalSynthesis = {
+          outcome: 'not-applied-user-edit',
+          sourceRetrievalMs,
+          durationMs: elapsedMs(synthesisStartedAt),
+          inputCharacters: sourceResult.transcriptText.length,
+          normalizedInputCharacters: normalizedSourceLength,
+          outputCharacters: validation.markdown.length,
+          preservedScreenshotCount: protectedAssets.assets.length
+        };
+        console.warn('[HoverNotes AI] Final source-grounded notes were not applied because the note changed during synthesis; user edits were preserved.');
+        showSaveStatus('Your edits were preserved. Final AI notes were not applied because the note changed during synthesis.', true);
+        return false;
+      }
+
+      elements.noteEditor.value = finalDocument;
+      flushMarkdownPreviewRender();
+      const saved = await saveCurrentNote();
+      if (!saved) {
+        elements.noteEditor.value = snapshot;
+        flushMarkdownPreviewRender();
+        await saveCurrentNote();
+        report.finalSynthesis = { outcome: 'save-failed', sourceRetrievalMs, durationMs: elapsedMs(synthesisStartedAt) };
+        return false;
+      }
+
+      report.finalSynthesis = {
+        outcome: 'applied-and-saved',
+        sourceRetrievalMs,
+        durationMs: elapsedMs(synthesisStartedAt),
+        sourceTranscriptCharacters: sourceResult.transcriptText.length,
+        normalizedTranscriptCharacters: normalizedSourceLength,
+        sourceCueCount: sourceResult.itemCount,
+        outputCharacters: validation.markdown.length,
+        preservedScreenshotCount: protectedAssets.assets.length
+      };
+      console.info('[HoverNotes Performance] Final study-note synthesis completed', report.finalSynthesis);
+      showSaveStatus(`Final study notes saved through ${formatTime(stopTime || 0)}`);
+      return true;
+    } catch (error) {
+      report.finalSynthesis = {
+        outcome: 'failed-draft-retained',
+        sourceRetrievalMs: report.finalSynthesis?.sourceRetrievalMs ?? null,
+        durationMs: elapsedMs(synthesisStartedAt),
+        reason: String(error?.message || error)
+      };
+      console.error('[HoverNotes AI] Source-grounded final synthesis failed; original incremental notes were retained.', error);
+      showSaveStatus(`Final study-note synthesis failed; your incremental notes were kept. ${error?.message || ''}`.trim(), true);
+      return false;
+    }
+  }
+
   // Stop monitoring immediately, then freeze the current YouTube timestamp before
   // allowing an in-flight generation to finish and the final interval to be flushed.
   async function handleAutoNotesButtonClick() {
@@ -772,6 +903,17 @@ tags: [hovernotes, gate-cs, study-notes]
       if (!videoIdAtStart || videoIdAtStart !== state.currentVideoId) throw new DOMException('Video changed.', 'AbortError');
       if (endTime <= startTime || (!force && endTime - startTime < 60)) {
         report.outcome = 'no-new-interval';
+        if (isFinalFlush && state.lastProcessedTime > 0) {
+          const polishStartedAt = perfNow();
+          await synthesizeFinalStudyNote({
+            videoId: videoIdAtStart,
+            videoTitle: video.videoTitle || state.videoState.videoTitle,
+            stopTime: Number.isFinite(endTimeLimit) ? endTimeLimit : startTime,
+            signal,
+            report
+          });
+          report.stages.finalSynthesisMs = elapsedMs(polishStartedAt);
+        }
         return false;
       }
       if (!state.vaultConnected) throw new Error('Connect your Obsidian vault before generating notes.');
@@ -832,18 +974,6 @@ tags: [hovernotes, gate-cs, study-notes]
           interval: `${formatTime(startTime)}–${formatTime(endTime)}`,
           error: report.frameCaptureError
         });
-      }
-      if (Number.isFinite(endTimeLimit)) {
-        const frozenBoundary = Math.floor(endTimeLimit);
-        // Keep transcript boundaries independent of the selected screenshot timestamp.
-        endTime = Math.min(endTime, frozenBoundary);
-        includeCapturedFrame = includeCapturedFrame && capturedFrameTime !== null && capturedFrameTime <= frozenBoundary;
-        if (frameData.dataUrl && capturedFrameTime !== null && capturedFrameTime > frozenBoundary) {
-          report.screenshotSkipped = 'The captured frame was after the frozen Stop boundary.';
-          console.warn('[HoverNotes AI] Screenshot omitted because capture occurred after Stop.', {
-            capturedFrameAt: formatTime(capturedFrameTime), stopBoundary: formatTime(frozenBoundary)
-          });
-        }
       }
 
       const CHUNK_SIZE = 300;
@@ -971,6 +1101,17 @@ tags: [hovernotes, gate-cs, study-notes]
       if (!saved) throw new Error('The note could not be saved. Progress was not committed.');
       report.outcome = 'saved';
       showSaveStatus(`Saved lecture notes through ${formatTime(endTime)}`);
+      if (isFinalFlush) {
+        const polishStartedAt = perfNow();
+        await synthesizeFinalStudyNote({
+          videoId: videoIdAtStart,
+          videoTitle: title,
+          stopTime: endTime,
+          signal,
+          report
+        });
+        report.stages.finalSynthesisMs = elapsedMs(polishStartedAt);
+      }
       return true;
     } catch (err) {
       report.errorName = err.name || 'Error';
@@ -1029,6 +1170,7 @@ tags: [hovernotes, gate-cs, study-notes]
         screenshotSkipped: report.screenshotSkipped || null,
         generatedCharacters: report.generatedCharacters,
         segmentCount: report.segmentCount,
+        finalSynthesis: report.finalSynthesis || null,
         preview: report.preview,
         geminiAttemptCount: report.geminiAttempts.filter(event => event.type === 'attempt-start').length
       });
@@ -1080,6 +1222,7 @@ tags: [hovernotes, gate-cs, study-notes]
     if (h > 0) return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
     return `${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
   }
+
 
   // =========================================================================
   // High-Fidelity Markdown & LaTeX Preview Renderer

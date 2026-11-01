@@ -1,0 +1,17 @@
+My HoverNotes v1.0.22 — local validation
+
+Automated checks run in the build container:
+- 18 Node test scripts passed.
+- The Markdown sanitizer suite passed all 4 TAP subtests.
+- Syntax checks passed for all 12 extension JavaScript files.
+- manifest.json parsed; manifest, sidebar UI and VERSION.txt agree on 1.0.22.
+- Marker-free smoke test simulated Gemini evidence extraction and final rendering returning ordinary Markdown with no HN_TIME/HN_SOURCE tokens; final synthesis completed.
+- Deterministic source-window mapping test verified each transcript window maps to exactly one packet and that omitting a packet is detected.
+- Mocked map/reduce test verified source-window sidecar metadata is carried through consolidation without requiring model-generated tokens.
+- ZIP integrity was checked after packaging.
+
+Not tested here:
+- Live Chrome installation/run.
+- Live Gemini API requests, model quality or quota behaviour.
+- Obsidian vault write/read integration.
+- Semantic completeness or parity with HoverNotes output.

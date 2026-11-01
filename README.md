@@ -1,50 +1,38 @@
-# My HoverNotes — Phase 1.0.16
+# My HoverNotes — v1.0.25
 
-Build: 1.0.16
+Build: 1.0.25
 
-## v1.0.16 — Screenshot-path recovery fix
+## v1.0.25 — Finalization recovery
 
-The service-worker fallback injection now loads `content/frame-quality.js` before `content.js`. This matches the manifest's normal content-script dependency order. Frame-quality helper calls now fail safely, and a screenshot-selection error no longer prevents transcript-grounded AI notes from being generated. The failed screenshot is recorded in diagnostics while note generation continues.
+v1.0.25 addresses the live v1.0.24 failure in which the final renderer returned four topic sections but the validator demanded seven based on the capture duration. That estimate is now advisory, not a hard pass/fail condition. The extension validates basic document integrity first, then performs at most one conditional structure-recovery request when the candidate has timestamp-led headings, lacks reference-style nesting/callouts, has excessive callouts, or appears to have merged distinct topics. A recovered note must pass strict structural validation before the existing source-to-note semantic audit can accept it. If a hard defect remains, the incremental draft is retained.
 
-The existing three Gemini API-key slots, Gemini model configuration, prompts, generation interval, Obsidian vault handle and storage schema are preserved.
+The Markdown validator also distinguishes an outer model-added Markdown wrapper from a legitimate code or Mermaid block at the end of a note, so it no longer strips a real closing fence.
 
-# My HoverNotes — Phase 1.0.15
+Offline regression includes a mocked reproduction of the four-heading v1.0.24 failure and verifies recovery plus semantic audit. This does not guarantee live Gemini editorial quality or 100% parity with the supplied HoverNotes export; one controlled Chrome run is still required.
 
-Build: 1.0.15
+## v1.0.24 — Editorial calibration and semantic coverage audit
 
-## v1.0.15 — Markdown preview sanitization and Phase 0 baseline
+After the final topic-based document is rendered from the original transcript evidence, the extension performs a separate second-pass source-to-note review using the configured AI provider. The reviewer compares bounded original transcript batches with the entire candidate document, identifies material omissions and claims directly contradicted by the batch, and can request one targeted repair. The repaired document is reviewed again. If material omissions remain, the extension retains the incremental draft instead of applying a document that failed the semantic gate.
 
-The Markdown preview now parses generated HTML through a local allowlist sanitizer before inserting it into the UI. Active content such as scripts, frames, SVG/MathML, event-handler attributes, unsafe URL schemes, and arbitrary CSS attributes are removed. Safe Markdown formatting, timestamp links, raster screenshot data URLs, code classes and LaTeX containers are retained. No external runtime dependency is added.
+This second pass uses the same configured model/provider pipeline; it is a separate review request, not an independent third-party judge or a guarantee of completeness. Automated tests mock model responses. Live Gemini output quality and full HoverNotes parity remain unverified.
 
-The existing caption retrieval, Gemini primary/fallback model selection, three-key configuration, note generation prompts, frame sampling, Obsidian folder handle and storage layout are unchanged.
+The renderer also consolidates repeated concepts, uses nested bullets for supporting explanations, limits bracketed callouts to selective use (normally one or two per main topic section), and conditionally runs one editorial refinement pass when measured callout density is excessive. The refined version is retained only when it passes structural validation and reduces callout count; the source-to-note semantic audit then checks it for content loss. A duplicate body H1 is removed only when it matches the YAML title, including the metadata-only ` - YouTube` suffix. Distinct H1 content and frontmatter are preserved.
 
-## v1.0.14 — Timestamped screenshots interleaved inside topic sections
+A fixed 00:00–08:00 benchmark, human-authored gold note, deterministic regex/style evaluator and measured reference profile are included under `benchmarks/` and `PHASE1.1-SEMANTIC-COVERAGE-REPORT.md`. The regex evaluator is a regression screen, not a semantic proof.
 
-v1.0.14 fixes the chronology defect observed in the v1.0.13 live Markdown. Previously, a screenshot was represented as a peer `### [timestamp]` heading, so the section sorter placed it after the entire parent topic—even when its timestamp belonged between timestamped teaching bullets inside that topic.
+## v1.0.22 — Deterministic source-window provenance
 
-The normalizer now extracts extension-managed screenshot heading/embed pairs before sorting, orders timestamped instructional bullet blocks within each topic section, and reinserts each screenshot as an inline timestamp link plus Obsidian embed immediately after the matching timestamped teaching point. If a timestamped observation was incorrectly nested below later bullet items, the normalizer restores its chronological position and list level. Legacy screenshot heading/embed pairs are migrated during normalization, and previous-note sanitization removes both old and new screenshot-anchor formats.
+The live note remains an incremental, recoverable draft. When you click Stop, the extension retrieves the original YouTube caption transcript from 00:00 through the frozen stop position and generates the final study document from that source—not from the already-compressed AI draft.
 
-The change preserves the existing screenshot-selection pipeline, promotional filter, perceptual duplicate suppression, 30-second Gemini first-token timeout/fallback, Stop handling, and YouTube large-caption bridge. It does not change the AI model, prompt, caption extraction, screenshot scoring, or segment size.
+**Evidence extraction is required for every capture length.** The transcript is divided at intact 30-second boundaries into bounded packets. The extension maps each non-empty time window to its packet using JavaScript-owned metadata. Gemini is not asked to echo hidden `HN_TIME_*` or `HN_SOURCE_*` identifiers. That brittle contract caused v1.0.21 to abort after otherwise successful model calls when a marker was omitted. Source-window metadata is carried through consolidation by the extension, independently of generated prose.
 
-Automated regression coverage uses the exact observed structure: a `[01:38]` DSA topic section, a nested `[01:41]` visual observation and screenshot, followed by `[02:04]` and `[02:19]` teaching bullets and a later `[02:40]` section. Tests verify that bullets, image anchor, image embed, and later section are ordered correctly, and that a second normalization pass does not duplicate the screenshot.
+The final renderer uses an editorial contract derived from the supplied `hovernotes.io.md` export: concept-oriented headings, nested hyphen bullets, bold bracketed labels, supported display equations, useful Mermaid diagrams, comparison tables, and occasional blockquotes. It rejects timestamp-led headings, insufficient topic structure, missing nested explanations, and output that is too short. It does not require synthetic source markers in the Markdown.
 
-Automated tests cannot prove every model-generated document will have this exact structure. The next live four-minute Chrome test must verify in-section placement in the actual Obsidian note.
+Original screenshot frames associated with a source packet can be attached to the evidence-extraction request when their image data remains in the current run cache. The extension independently preserves and restores screenshot timestamp links and Obsidian image embeds. The model is asked to capture only slide information that is visibly legible; this does not guarantee OCR-quality extraction from every frame.
 
-## v1.0.13 — Markdown block integrity and instructional coverage
+YouTube description metadata and earlier AI-generated draft notes are excluded from the final factual prompt. The original YAML frontmatter and extension-managed screenshot embeds remain preserved. Instructor claims are retained only when supported by the transcript or visible source material and should be attributed as claims.
 
-v1.0.13 repaired concatenated Markdown block boundaries and strengthened instructions to retain conceptual motivation, subject importance, learning objectives, instructor reasoning, analogies, and distinctions between memorization and understanding. These were prompt and normalization improvements, not a deterministic guarantee against omissions.
-
-## v1.0.12 — Obstruction-aware frame ranking and chronological note cleanup
-
-v1.0.12 preserved the v1.0.11 promotional gate and perceptual deduplication, added a local foreground-obstruction scoring proxy, inserted screenshots at timestamps, removed exact duplicate embeds and repeated canonical definitions, and repaired a known malformed timestamp shape. The obstruction proxy is not OCR, face detection, or semantic image understanding.
-
-## v1.0.11 — Transcript-aware screenshot filtering and deduplication
-
-v1.0.11 added transcript-based promotional-frame suppression and perceptual duplicate-frame detection while preserving Gemini fallback, caption retrieval, Stop handling and existing generation settings.
-
-## v1.0.10 — Bounded Gemini first-token wait and study-frame sampling
-
-v1.0.10 added a 30-second first-text-token timeout with model fallback and passive frame sampling. The local visual heuristic was subsequently refined by transcript promotion filtering and perceptual deduplication.
+The extension continues using the existing Gemini keys, model/fallback configuration, Chrome storage, and Obsidian folder permission. No uninstall/reinstall or storage reset is required for an in-place update.
 
 ## Requirements
 
@@ -67,11 +55,20 @@ v1.0.10 added a 30-second first-text-token timeout with model fallback and passi
 
 - The extension does not directly transcribe video audio. It depends on captions exposed by YouTube.
 - Automatic screenshot selection is heuristic. It cannot guarantee that every selected frame is educational, unobstructed, or fully readable.
-- Model output still requires comparison against the supplied transcript for high-stakes study use.
+- The source-window sidecar proves that each transcript window is assigned to an evidence packet and tracked through reduction. The v1.0.25 second-pass audit checks the rendered note against the original transcript and can request one repair, but it uses the same configured model/provider pipeline and is not a mathematical proof of semantic completeness. The final Markdown still needs quality review.
 - The extension is a Phase 1 prototype; full HoverNotes parity and non-YouTube support are not claimed.
 
 ## Testing
 
-Run each test in `tests/*.test.cjs` with Node.js. The regression suite checks caption parsing and large-body chunk reassembly, Gemini fallback, screenshot filtering/deduplication, note normalization and Stop/performance instrumentation. Browser integration and model-quality behaviour still require a live Chrome smoke test.
+Run each test in `tests/*.test.cjs` with Node.js. The regression suite checks caption parsing and large-body chunk reassembly, Gemini fallback, screenshot filtering/deduplication, note normalization, Stop/performance instrumentation, deterministic source-window mapping, marker-free extraction, map/reduce metadata continuity, source-to-note second-pass review, targeted repair, fail-closed verification and reference-benchmark behavior. Browser integration and real Gemini note quality are not covered by mocked tests.
 
-For the current acceptance procedure, see `PHASE1-TEST-PLAN.md`.
+For offline developer checks, see `PHASE1-TEST-PLAN.md`. The benchmark methodology and limitations are documented in `PHASE1.1-SEMANTIC-COVERAGE-REPORT.md`.
+
+## Synthesis limits
+
+- The extension depends on caption tracks exposed by YouTube; it does not transcribe audio itself.
+- Evidence chunks are bounded at approximately 9,000 characters without splitting a 30-second source window. Evidence-ledger consolidation is bounded at 36,000 characters and five levels. Each model request is capped at 8,192 output tokens.
+- Provider quotas, transient model availability, context limits and model quality can still prevent a complete final document. If retrieval, extraction, consolidation, validation or saving fails, the extension retains the incremental draft.
+- Evidence extraction and the second-pass audit can each inspect up to four cached screenshot frames for a request or packet. It does not guarantee OCR-quality extraction from every frame; screenshot embeds remain preserved even when slide text is unreadable or a frame is unavailable.
+- These limits do not guarantee one polished Markdown document for an unrestricted 12-hour lecture. Very long-course chapter splitting and resumable multi-document synthesis remain future work.
+- Automated tests verify wiring, chunk integrity, source-window sidecar coverage and output structure. They cannot prove semantic completeness or live Gemini quality. The final Markdown must be evaluated against the matching source interval in `hovernotes.io.md`.

@@ -1,0 +1,28 @@
+My HoverNotes v1.0.19 — local automated validation
+
+Architecture:
+- Stop-time finalization retrieves original YouTube timestamped captions from 00:00 to the frozen Stop boundary.
+- Incremental draft is not treated as the complete factual source.
+- Transcript timestamps/text are retained while repeated timestamp hyperlink wrappers are stripped from model input.
+- Short transcripts use direct synthesis; longer transcripts use cue-bounded map extraction and marker-preserving hierarchical reduction.
+- Screenshot-associated draft excerpts are passed only as limited secondary visual context; the original transcript remains authoritative.
+- Final Markdown is topic-organized and validated before replacing the saved draft. User edits and the previous draft are protected on failure.
+
+Automated validation:
+- 17/17 Node test scripts passed.
+- Markdown sanitizer TAP tests: 4/4 passed.
+- All JavaScript files in background/, content/, and sidebar/ passed `node --check`.
+- manifest.json parsed; manifest version, UI version and VERSION.txt agree at 1.0.19.
+- ZIP archive integrity verified after packaging.
+
+Not verified by local automated tests:
+- Real Gemini response quality or quota availability.
+- Chrome end-to-end Stop/final-synthesis behavior.
+- Obsidian rendering of generated Mermaid diagrams in a live vault.
+- Semantic completeness compared with HoverNotes output.
+
+Known limits:
+- Direct mode <=18,000 normalized transcript characters.
+- Map chunks approximately 10,000 characters, evidence ledger <=36,000 characters, at most five reduction levels.
+- Final response cap: 8,192 output tokens.
+- Very long lectures may fail safely and retain the incremental draft; 12-hour single-document output is not guaranteed.

@@ -1,0 +1,156 @@
+{
+  "benchmarkId": "kg-dsa-intro-00-08",
+  "limitations": "Deterministic regex/formatting regression screen only. Historical files are pre-final/fallback drafts, not successful final-render AI outputs. The curated gold note is human-authored from the transcript, not a live model result.",
+  "evaluations": {
+    "curatedGold": {
+      "label": "Human-authored 00:00–08:00 benchmark fixture",
+      "words": 870,
+      "coverage": {
+        "passed": 13,
+        "total": 13,
+        "percentage": 100
+      },
+      "style": {
+        "passed": 9,
+        "total": 9,
+        "metrics": {
+          "topicHeadings": 9,
+          "timestampHeadings": 0,
+          "hyphenBullets": 41,
+          "asteriskBullets": 0,
+          "nestedHyphenBullets": 19,
+          "boldCallouts": 18,
+          "mermaidDiagrams": 1,
+          "displayEquations": 1,
+          "markdownTables": 0,
+          "blockquotes": 0,
+          "hyphenBulletRatio": 1
+        }
+      },
+      "passed": true,
+      "failedCoverageGroups": [],
+      "failedStyleChecks": []
+    },
+    "v1_0_21_incremental": {
+      "label": "v1.0.21 incremental draft (final synthesis aborted)",
+      "words": 1135,
+      "coverage": {
+        "passed": 12,
+        "total": 13,
+        "percentage": 92
+      },
+      "style": {
+        "passed": 3,
+        "total": 9,
+        "metrics": {
+          "topicHeadings": 8,
+          "timestampHeadings": 8,
+          "hyphenBullets": 2,
+          "asteriskBullets": 26,
+          "nestedHyphenBullets": 0,
+          "boldCallouts": 0,
+          "mermaidDiagrams": 0,
+          "displayEquations": 0,
+          "markdownTables": 0,
+          "blockquotes": 0,
+          "hyphenBulletRatio": 0.071
+        }
+      },
+      "passed": false,
+      "failedCoverageGroups": [
+        "Algorithm as a systematic step-by-step procedure"
+      ],
+      "failedStyleChecks": [
+        "no timestamp-led headings",
+        "nested hyphen bullets",
+        "bold concept callouts",
+        "Mermaid diagrams",
+        "display equations",
+        "hyphen bullet ratio"
+      ]
+    },
+    "v1_0_20_incremental": {
+      "label": "v1.0.20 prior draft (final synthesis rejected)",
+      "words": 513,
+      "coverage": {
+        "passed": 7,
+        "total": 13,
+        "percentage": 54
+      },
+      "style": {
+        "passed": 3,
+        "total": 9,
+        "metrics": {
+          "topicHeadings": 4,
+          "timestampHeadings": 0,
+          "hyphenBullets": 2,
+          "asteriskBullets": 28,
+          "nestedHyphenBullets": 0,
+          "boldCallouts": 0,
+          "mermaidDiagrams": 0,
+          "displayEquations": 0,
+          "markdownTables": 0,
+          "blockquotes": 0,
+          "hyphenBulletRatio": 0.067
+        }
+      },
+      "passed": false,
+      "failedCoverageGroups": [
+        "Importance of DSA and depth of fundamentals",
+        "Purpose of studying DSA beyond memorizing operations",
+        "Data structure definition and early examples",
+        "Kitchen, medical-store and large-scale organization analogies",
+        "Organization alone is insufficient; data must also be used toward an objective",
+        "Instructor's observation that starting programming directly can confuse beginners"
+      ],
+      "failedStyleChecks": [
+        "topic headings",
+        "nested hyphen bullets",
+        "bold concept callouts",
+        "Mermaid diagrams",
+        "display equations",
+        "hyphen bullet ratio"
+      ]
+    },
+    "earlier_incremental": {
+      "label": "Earlier prior draft (not accepted final synthesis)",
+      "words": 870,
+      "coverage": {
+        "passed": 9,
+        "total": 13,
+        "percentage": 69
+      },
+      "style": {
+        "passed": 4,
+        "total": 9,
+        "metrics": {
+          "topicHeadings": 6,
+          "timestampHeadings": 6,
+          "hyphenBullets": 2,
+          "asteriskBullets": 18,
+          "nestedHyphenBullets": 0,
+          "boldCallouts": 0,
+          "mermaidDiagrams": 0,
+          "displayEquations": 1,
+          "markdownTables": 0,
+          "blockquotes": 0,
+          "hyphenBulletRatio": 0.1
+        }
+      },
+      "passed": false,
+      "failedCoverageGroups": [
+        "Instructor background and stated experience",
+        "Kitchen, medical-store and large-scale organization analogies",
+        "Organization alone is insufficient; data must also be used toward an objective",
+        "Instructor's observation that starting programming directly can confuse beginners"
+      ],
+      "failedStyleChecks": [
+        "no timestamp-led headings",
+        "nested hyphen bullets",
+        "bold concept callouts",
+        "Mermaid diagrams",
+        "hyphen bullet ratio"
+      ]
+    }
+  }
+}

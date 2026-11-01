@@ -114,12 +114,23 @@
       channelName = channelEl.textContent ? channelEl.textContent.trim() : '';
     }
 
+    const descriptionEl = document.querySelector('#description-inline-expander #content') ||
+                          document.querySelector('#description-inner') ||
+                          document.querySelector('ytd-text-inline-expander#description-inline-expander');
+    const descriptionMeta = document.querySelector('meta[name="description"]') ||
+                            document.querySelector('meta[property="og:description"]');
+    const videoDescription = String(descriptionEl?.innerText || descriptionMeta?.content || '')
+      .replace(/\r/g, '')
+      .trim()
+      .slice(0, 12000);
+
     const curTime = video ? video.currentTime : 0;
     const durTime = video ? (video.duration || 0) : 0;
 
     return {
       videoId: videoId || currentVideoId,
       videoTitle: videoTitle.trim() || 'Untitled YouTube Video',
+      videoDescription,
       channelName: channelName || 'YouTube Creator',
       videoUrl: videoId ? `https://www.youtube.com/watch?v=${videoId}` : window.location.href,
       currentTime: curTime,

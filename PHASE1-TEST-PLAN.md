@@ -1,47 +1,43 @@
-## v1.0.16 in-section screenshot chronology checks
+# Phase 1.1 — developer verification plan (v1.0.25)
 
-- Normalize the exact observed note structure: `### [01:38]` parent section, timestamped bullets `[01:38–02:04]`, `[02:04–02:19]`, `[02:19–02:39]`, a nested `[01:41]` visual observation, and a legacy `### [01:41](URL)` plus image embed.
-- Confirm timestamped bullet blocks become `[01:38]`, `[01:41]`, `[02:04]`, `[02:19]` in that order; the earlier visual observation is no longer nested beneath a later bullet.
-- Confirm the screenshot anchor and Obsidian embed are inserted immediately after the `[01:41]` visual observation inside the `[01:38]` topic section, not after the entire parent section.
-- Confirm the screenshot is represented as an inline timestamp link plus image embed rather than a peer `###` heading when a timestamped parent section exists.
-- Normalize the resulting document a second time and confirm the image embed appears exactly once.
-- Confirm legacy top-level screenshots still insert chronologically when no preceding timestamped topic section exists.
-- Confirm previous-note sanitization removes the screenshot embed and its associated timestamp link in both legacy and inline formats.
+This is an internal/offline verification plan. It is not a request for the user to run another playback test.
 
-# Phase 1 manual acceptance test plan
+## Automated suite
 
-These tests must be run in Chrome with the existing connected Obsidian vault. The source ZIP and local regression tests cannot validate live Chrome/Obsidian behaviour or model quality.
+Run from the extension root:
 
-## Current four-minute live test
+```bash
+for f in tests/*.test.cjs; do node "$f" || exit 1; done
+```
 
-1. Reload v1.0.16 from the same permanent unpacked extension directory and refresh the same YouTube lecture. Keep the existing vault connection; do not clear extension storage.
-2. Start the supplied KnowledgeGATE lecture at `00:00`, playback speed `2×`, and click **AI Notes**.
-3. At approximately `04:00`, pause YouTube first, click Stop, and wait until generation and saving finish.
-4. Export the single YouTube-tab Console log, generated Markdown, and all referenced screenshot files.
-5. Verify the note has the introductory DSA conceptual explanation, chronological timestamped teaching bullets, and no repeated screenshot embeds.
-6. Specifically verify the `[01:41]` visual observation and screenshot sit inside the `[01:38]` DSA section, before the `[02:04]` and `[02:19]` bullets.
-7. Confirm screenshot links are on separate Markdown blocks, image paths resolve in `HoverNotes/images/`, and all timestamp references are chronologically appropriate.
-8. Confirm the 30-second Gemini first-token timeout/fallback and caption chunk-reassembly remain operational.
+The suite must cover:
+- Transcript extraction, 30-second windows, packet association and map/reduce sidecars.
+- Marker-free model responses.
+- Reference-style output validation and conditional structural/editorial recovery, soft heading guidance, timestamp-heading removal, and selective callout-density refinement.
+- Second-pass audit JSON parsing and source-batch construction.
+- Omission detection, targeted repair, post-repair verification and fail-closed rejection.
+- Screenshot restoration, frontmatter preservation, duplicate-title H1 cleanup (exact match only), and manual-edit safeguards.
+- Existing caption, frame, Stop-boundary and Gemini fallback regressions.
 
-## Benchmark procedure (only after the four-minute test passes)
+## Fixed benchmark
 
-- Use the same YouTube lecture, start at `00:00`, set playback to `2.0×`.
-- Start AI Notes and run until the player's timestamp reaches `30:00`.
-- Pause at `30:00`, click Stop, wait for the final interval to finish and save.
-- Export `HoverNotes/` (Markdown plus all referenced images) and compare against the original transcript.
+Run:
 
-## General acceptance checks
+```bash
+node benchmarks/evaluate-reference-parity.cjs benchmarks/fixtures/dsa-lecture-00-08-golden.md
+```
 
-1. **Grounding:** Every factual statement must be supported by the supplied captions or visibly legible frame. Do not silently add generic GATE/DSA material.
-2. **Coverage:** Meaningful conceptual motivation and instructor reasoning must not be discarded merely because the segment contains no formula or operation.
-3. **Chronology:** Timestamped sections, timestamped bullets, visual observations and screenshot anchors must follow lecture time.
-4. **Prior context:** Later segments should not reproduce previous sections verbatim.
-5. **Checkpoint integrity:** Failed/empty AI responses must not advance the processed cursor.
-6. **Stop:** The final flush must not exceed the timestamp captured when Stop was clicked.
-7. **Vault persistence:** Every Markdown image reference must resolve to a saved image under `HoverNotes/images/`.
-8. **No captions:** A video without accessible captions must report that limitation and leave the progress checkpoint unchanged.
-9. **Extension reload:** Reloading from the same folder path should retain the existing vault permission, subject to Chrome's permission state.
+Expected: 13/13 content signal groups and 9/9 style checks.
 
-## Not a Phase 1 acceptance claim
+The evaluator is a deterministic regex/formatting screen, not a full semantic judge. Its scores must be labelled accordingly. The gold note is a human-authored benchmark based on the user-supplied 00:00–08:00 transcript, not a live AI result or a claim about HoverNotes' private output.
 
-These tests do not prove direct audio transcription, caption-free operation, continuous visual comprehension, full HoverNotes parity, or support for non-YouTube sites.
+## Package checks
+
+- `node --check` every JavaScript file under `background/`, `content/`, `sidebar/` and `tests/` where applicable.
+- Parse `manifest.json` and verify `manifest.json`, `VERSION.txt`, and visible UI build label all say `1.0.25`.
+- Confirm no API keys are present in package files.
+- Create ZIP with `manifest.json` at archive root and run `unzip -t`.
+
+## Live integration status
+
+Live Chrome and Gemini are not available to this offline developer harness. Do not claim the second-pass reviewer guarantees completeness or that v1.0.25 has achieved HoverNotes parity until a real final document has been inspected.

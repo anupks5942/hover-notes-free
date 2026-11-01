@@ -1,0 +1,101 @@
+{
+  "benchmarkId": "kg-dsa-intro-00-08",
+  "videoId": "2o2vX0ZqQ_Y",
+  "sourceInterval": { "startSeconds": 0, "endSeconds": 480 },
+  "basis": {
+    "transcript": "User-supplied Transcript(5).txt, timestamped Hindi transcript",
+    "reference": "User-supplied hovernotes.io.md",
+    "scopeNote": "The checks below cover source material through 08:00 only. They do not compare the 8-minute capture against the complete lecture export."
+  },
+  "coverageGroups": [
+    {
+      "id": "instructor-background",
+      "label": "Instructor background and stated experience",
+      "signals": ["15 years", "thousands", "coaching"],
+      "minimumHits": 3
+    },
+    {
+      "id": "course-design",
+      "label": "GATE course structure, level and teaching strategy",
+      "signals": ["GATE", "100%", "prior knowledge", "real-life", "previous-year|PYQ", "shortcut|technique", "exam roadmap|roadmap", "concept videos"],
+      "minimumHits": 5
+    },
+    {
+      "id": "dsa-importance",
+      "label": "Importance of DSA and depth of fundamentals",
+      "signals": ["40 subjects|forty subjects", "conceptual clarity|clarity", "fundamentals", "depth|deeply", "career|professional life|lifetime"],
+      "minimumHits": 4
+    },
+    {
+      "id": "purpose-not-memorization",
+      "label": "Purpose of studying DSA beyond memorizing operations",
+      "signals": ["insert(ion)? and delete(ion)?", "memor(izing|ize)", "computer science engineer|IT engineer", "purpose|intention|objective"],
+      "minimumHits": 3
+    },
+    {
+      "id": "algorithm-definition",
+      "label": "Algorithm as a systematic step-by-step procedure",
+      "signals": ["step-by-step|systematic", "programming language", "executed|execution", "solve a problem|problem solving"],
+      "minimumHits": 3
+    },
+    {
+      "id": "algorithm-comparison",
+      "label": "Multiple algorithms and evaluation criteria",
+      "signals": ["multiple algorithms|different algorithms", "same problem", "time", "memory|space"],
+      "minimumHits": 3
+    },
+    {
+      "id": "time-priority",
+      "label": "Instructor's argument for prioritizing time over memory",
+      "signals": ["time.*most important|time is.*critical|priority.*time", "hardware|devices", "ample.*memory|memory.*available", "cloud", "minimum.*time|least amount of time"],
+      "minimumHits": 4
+    },
+    {
+      "id": "code-length-misconception",
+      "label": "Code brevity versus execution speed",
+      "signals": ["10[ -]line|ten lines", "4[ -]line|four lines", "short.*code|code.*short", "execution speed|executes.*quick|how quickly"],
+      "minimumHits": 3
+    },
+    {
+      "id": "two-pillars",
+      "label": "Data structures and algorithms as the two pillars of efficiency",
+      "signals": ["data structures", "algorithms", "efficient program|efficient execution", "both|two"],
+      "minimumHits": 3
+    },
+    {
+      "id": "data-structure-definition",
+      "label": "Data structure definition and early examples",
+      "signals": ["organize.*data|organization of data", "computer.*memory|memory.*computer", "array", "stack", "queue", "linked list|tree"],
+      "minimumHits": 5
+    },
+    {
+      "id": "organization-analogies",
+      "label": "Kitchen, medical-store and large-scale organization analogies",
+      "signals": ["kitchen|spice", "medical store|pharmacist|medicine", "factory|amazon|warehouse", "organized.*find|find.*organized|locate"],
+      "minimumHits": 3
+    },
+    {
+      "id": "organization-and-use",
+      "label": "Organization alone is insufficient; data must also be used toward an objective",
+      "signals": ["organize.*use|use.*organize", "hostel|room|almirah|table", "objective function|objective", "both.*organize|organize.*and.*use"],
+      "minimumHits": 3
+    },
+    {
+      "id": "beginner-programming-difficulty",
+      "label": "Instructor's observation that starting programming directly can confuse beginners",
+      "signals": ["programming.*direct|directly.*programming", "confus|tough|difficult", "why.*what.*doing|what.*why"],
+      "minimumHits": 2
+    }
+  ],
+  "styleExpectations": {
+    "minimumTopicHeadings": 5,
+    "maximumTimestampHeadings": 0,
+    "minimumNestedHyphenBullets": 5,
+    "minimumBoldCallouts": 3,
+    "minimumMermaidDiagrams": 1,
+    "minimumDisplayEquations": 1,
+    "minimumHyphenBulletRatio": 0.85,
+    "minimumWords": 400,
+    "maximumWords": 1500
+  }
+}

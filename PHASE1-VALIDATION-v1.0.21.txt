@@ -1,0 +1,29 @@
+My HoverNotes v1.0.21 — local validation
+
+Changes:
+- Evidence extraction now runs for every transcript size; no direct-render shortcut for short captures.
+- Original transcript is divided into intact timestamped cue chunks.
+- Every non-empty 30-second time window receives a unique coverage marker carried through extraction, reduction and final rendering.
+- Missing final coverage markers trigger one targeted repair attempt before validation failure.
+- Final Markdown uses an explicit style contract derived from the supplied HoverNotes export.
+- YouTube description and earlier AI-generated draft context are excluded from factual synthesis.
+- Structure validation checks heading density, nested bullets, bold callouts, markers and fenced-block integrity.
+
+Not yet verified:
+- Live Chrome/Gemini request behavior and output quality.
+- Actual parity against the reference on the same video interval.
+- Full OCR/vision coverage of every screenshot. Up to two cached frames per evidence chunk (four per request) are attached to extraction; images unavailable in the current run cache are not re-read.
+
+Automated validation performed:
+- 18/18 Node regression test scripts passed.
+- Markdown sanitizer TAP subtests: 4/4 passed.
+- JavaScript syntax checks: 12/12 passed across background/, content/ and sidebar/.
+- manifest.json parsed; manifest, sidebar UI and VERSION.txt agree on 1.0.21.
+- ZIP integrity is checked during packaging.
+- A regression fixture confirms that the v1.0.20 three-section, asterisk-bullet output is rejected by the new heading-density and hyphen-bullet gates.
+
+Not performed:
+- No live Chrome session or Gemini API request was run in this environment.
+- No claim is made that the next generated note will achieve full HoverNotes parity until its actual Markdown is inspected.
+
+Do not treat unit tests as proof of semantic note quality.

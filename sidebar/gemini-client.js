@@ -566,6 +566,7 @@ NON-NEGOTIABLE GROUNDING RULES:
     currentTimestamp,
     transcriptChunk,
     frameBase64,
+    frameImages = [],
     frameTimestamp = null,
     modeLabel = 'Lecture Notes',
     onChunk,
@@ -573,7 +574,10 @@ NON-NEGOTIABLE GROUNDING RULES:
     onError,
     onDiagnostics,
     existingNotes = '',
-    signal
+    signal,
+    promptOverride = null,
+    systemPromptOverride = null,
+    maxOutputTokens = 8192
   }) {
     const configStartedAt = performance.now();
     await this.initConfig();
@@ -600,10 +604,10 @@ NON-NEGOTIABLE GROUNDING RULES:
     if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
 
     const priorContext = this.sanitizePreviousNotes(existingNotes).slice(-12000);
-    const userPrompt = `Video title: ${videoTitle}
+    const generatedSegmentPrompt = `Video title: ${videoTitle}
 Lecture timestamp range: ${currentTimestamp}
 Generation mode: ${modeLabel}
-Visual evidence timestamp: ${frameBase64 && frameTimestamp ? frameTimestamp : '[No visual frame attached]'}
+Visual evidence timestamps: ${[...(frameBase64 && frameTimestamp ? [frameTimestamp] : []), ...(Array.isArray(frameImages) ? frameImages.map((_, index) => `attached frame ${index + 1}`) : [])].join(', ') || '[No visual frame attached]'}
 
 TRANSCRIPT EVIDENCE (primary source):
 """
@@ -632,6 +636,12 @@ CHRONOLOGY AND ASSET RULES:
 - Do not restate definitions already covered in previous notes; add only new information from this interval.
 - If a slide and the instructor's speech present the same definition, combine them into one concise note and mention that the slide supports the spoken explanation; do not repeat the definition in a separate visual-observation section.
 - Format time ranges consistently as [MM:SS–MM:SS] (or [HH:MM:SS–HH:MM:SS] when needed). Use only timestamps present in the transcript.`;
+    const userPrompt = typeof promptOverride === 'string' && promptOverride.trim()
+      ? promptOverride
+      : generatedSegmentPrompt;
+    const activeSystemPrompt = typeof systemPromptOverride === 'string' && systemPromptOverride.trim()
+      ? systemPromptOverride
+      : this.systemPrompt;
 
     const preferredModel = this.sessionPreferredModel || this.activeModel || this.primaryModel;
     const modelsToTry = [preferredModel, this.primaryModel, this.fallbackModel]
@@ -665,10 +675,13 @@ CHRONOLOGY AND ASSET RULES:
             model,
             promptText: userPrompt,
             frameBase64,
+            frameImages,
             onChunk,
             onComplete,
             signal,
-            onDiagnostics
+            onDiagnostics,
+            systemPrompt: activeSystemPrompt,
+            maxOutputTokens
           });
           // Once a fallback proves healthy, keep using it for the rest of this
           // extension session instead of paying the first-token timeout on every
@@ -733,10 +746,13 @@ CHRONOLOGY AND ASSET RULES:
         const generated = await this.streamOpenAIExtension({
           promptText: userPrompt,
           frameBase64,
+          frameImages,
           onChunk,
           onComplete,
           signal,
-          onDiagnostics
+          onDiagnostics,
+          systemPrompt: activeSystemPrompt,
+          maxOutputTokens
         });
         this.emitDiagnostics(onDiagnostics, {
           type: 'attempt-success',
@@ -765,6 +781,710 @@ CHRONOLOGY AND ASSET RULES:
     throw finalError;
   }
 
+  // Final study notes always pass through evidence extraction, even for short
+  // transcripts. Direct transcript-to-final rendering previously bypassed the
+  // only stage designed to preserve every distinct teaching point.
+  async synthesizeStudyDocument({ videoTitle, stopTime, sourceTranscript, videoDescription = '', visualAssets = [], supplementaryVisualNotes = '', onDiagnostics, signal }) {
+    const rawTranscript = String(sourceTranscript || '').trim();
+    if (!rawTranscript) throw new Error('The complete source transcript could not be retrieved. The incremental draft was retained.');
+    if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
+    const helpers = window.HoverNotesNoteSynthesis;
+    if (!helpers) throw new Error('The source-grounded synthesis helpers did not load.');
+    const transcript = helpers.normalizeTranscriptForAI(rawTranscript);
+    if (!transcript) throw new Error('Transcript normalization returned no usable cue text.');
+
+    const lines = transcript.split(/\r?\n/).filter(line => line.trim());
+    const coverageWindows = helpers.buildCoverageWindows(lines, 30);
+    if (!coverageWindows.length) throw new Error('The source transcript has no usable timestamped cues.');
+    const visualTokens = (Array.isArray(visualAssets) ? visualAssets : []).map(x => String(x?.token || '').trim()).filter(Boolean);
+    const assetInstructions = visualAssets.length
+      ? visualAssets.map(x => `${x.token} — OPTIONAL placement hint for the preserved screenshot at ${x.timestamp}. The extension restores the actual image independently.`).join('\n')
+      : '[No screenshot assets selected.]';
+
+    const systemPrompt = `You are an expert educational note editor translating timestamped Hindi/Hinglish lecture transcripts into accurate, comprehensive English study notes.
+
+FACTUAL RULES:
+- The supplied timestamped transcript and any attached original screenshot frames are the only factual sources for instructional content. Use frames only for text or relationships visibly legible in the image; do not infer hidden slide content.
+- Do not use video title, YouTube description, channel metadata, earlier AI drafts, or guesses as factual evidence. They are metadata or potentially lossy material, not lecture evidence.
+- Do not invent instructor credentials, years of experience, institutions, syllabus guarantees, course features, examples, formulas, code, complexity bounds, diagrams, or claims.
+- Preserve claims as claims made by the instructor; do not silently correct or endorse them.
+- Preserve every distinct explanation, reason, example, analogy, comparison, qualification, numerical detail, definition, procedure, and teaching point.
+- Translate faithfully. If the transcript is unclear, retain uncertainty rather than guessing.
+- Remove greetings and repeated filler only when they add no instructional or course information.
+- Consolidate repeated explanations of the same concept across the lecture. Preserve each distinct reason or example, but do not restate a definition, formula, or conclusion in multiple sections.
+- Prefer compact, information-dense notes over repeated prose. Do not add connective sentences that merely repeat the preceding bullet.
+- Never compress merely to reduce length. Completeness and source fidelity take priority over brevity.`;
+
+    const stage = (name, details = {}) => this.emitDiagnostics(onDiagnostics, { stage: name, ...details });
+    const startedAt = performance.now();
+    // Evidence extraction is mandatory for all transcript sizes. A 6-minute
+    // lecture must not bypass the coverage-preserving stage just because it is
+    // smaller than a model context threshold.
+    const chunkLimit = 9000;
+    const chunks = helpers.chunkTranscriptByTimeWindows(lines, chunkLimit, 30);
+    if (!chunks.length) throw new Error('The transcript could not be divided into source-grounded chunks.');
+    stage('source-map-start', {
+      strategy: 'evidence-first-all-lengths',
+      chunkCount: chunks.length,
+      inputCharacters: transcript.length,
+      chunkLimit,
+      coverageWindowCount: coverageWindows.length,
+      coverageWindowSeconds: 30
+    });
+
+    let packets = [];
+    let packetWindows = [];
+    let extractionCount = 0;
+    let reductionCount = 0;
+    const coverageAssignment = helpers.validateCoverageAssignment(chunks, coverageWindows, 30);
+    if (!coverageAssignment.valid) {
+      throw new Error(`Transcript chunking did not map every source window exactly once (missing: ${coverageAssignment.missing.join(', ') || 'none'}; duplicated: ${coverageAssignment.duplicated.join(', ') || 'none'}). The original draft was retained.`);
+    }
+
+    for (let i = 0; i < chunks.length; i++) {
+      if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
+      const chunk = chunks[i];
+      const chunkBuckets = new Set(chunk.lines.map(line => {
+        const seconds = helpers.parseTimestampSeconds(line);
+        return seconds === null ? null : Math.floor(seconds / 30);
+      }).filter(x => x !== null));
+      const chunkWindows = coverageWindows.filter(window => chunkBuckets.has(window.bucket));
+      const rangeManifest = chunkWindows.map(x => `${x.startLabel}–${x.endLabel} (${x.cueCount} transcript cues)`).join('\n');
+      const chunkVisualAssets = visualAssets.filter(asset => {
+        if (!asset?.dataUrl || !Number.isFinite(chunk.startTime) || !Number.isFinite(chunk.endTime)) return false;
+        const seconds = helpers.parseTimestampSeconds(`[${asset.timestamp || ''}]`);
+        return seconds !== null && seconds >= chunk.startTime && seconds <= chunk.endTime;
+      }).slice(0, 4);
+      const visualManifest = chunkVisualAssets.length
+        ? chunkVisualAssets.map(asset => `Original slide/frame attached at ${asset.timestamp}; inspect only visibly legible content.`).join('\n')
+        : '[No original screenshot frame is available for this source segment.]';
+
+      const prompt = `Build a comprehensive, loss-minimizing evidence packet from this original lecture segment. This is NOT a summary and NOT the final study document.
+
+VIDEO CONTEXT (metadata only): ${videoTitle || 'Untitled lecture'}
+SEGMENT: ${i + 1}/${chunks.length}
+SOURCE RANGE: ${chunk.startLabel || 'unknown'}–${chunk.endLabel || 'unknown'}
+SOURCE WINDOWS INCLUDED IN THIS PACKET:
+${rangeManifest}
+
+ORIGINAL TIMESTAMPED TRANSCRIPT:
+<transcript>
+${chunk.transcriptText}
+</transcript>
+
+ORIGINAL VISUAL EVIDENCE:
+${visualManifest}
+The attached original frames are supporting sources. Capture only text, labels, equations, examples, classifications, or relationships that are actually visible and readable. Attribute visual-only information to the slide/frame; do not invent what is obscured.
+
+EVIDENCE EXTRACTION REQUIREMENTS:
+1. Account for every substantive statement across the full source range above. The extension tracks the source-window metadata separately; do not reproduce machine-generated IDs, hidden markers, or tokens.
+2. Preserve the lecture's progression and all distinct ideas. Do not skip introductory rationale, motivation, conceptual framing, teaching strategy, or why a topic matters.
+3. Capture definitions, explanations, reasoning, examples, analogies, comparisons, caveats, named entities, numbers, claims, procedures, and exam/course information when actually spoken.
+4. Translate Hindi/Hinglish faithfully into clear English. Preserve the instructor's intended meaning and attribute personal opinions/claims.
+5. Combine repeated wording only when it is genuinely redundant. Do not merge separate ideas into a vague sentence.
+6. Use topic labels and nested bullets. Keep ordinary source timestamps beside evidence statements for traceability; the final renderer may remove timestamps from the finished prose.
+7. Do not add general textbook knowledge or details from the video description.
+8. Do not impose a word-count target. The packet must retain enough detail to reconstruct the segment without replaying it.
+9. Return Markdown only. Do not add a YAML frontmatter block or a video title.
+
+The source windows listed above are authoritative coverage metadata. They are already associated with this packet by the extension. Never invent, omit, or rewrite that metadata; simply extract the content from the transcript.`;
+
+      const packet = await this.generateNotesStream({
+        videoTitle,
+        currentTimestamp: `${chunk.startLabel || ''}–${chunk.endLabel || ''}`,
+        transcriptChunk: chunk.transcriptText,
+        modeLabel: 'Timestamp-windowed comprehensive evidence extraction',
+        promptOverride: prompt,
+        systemPromptOverride: systemPrompt,
+        frameImages: chunkVisualAssets.map(asset => asset.dataUrl),
+        maxOutputTokens: 8192,
+        signal,
+        onDiagnostics: event => stage('source-map-attempt', { chunk: i + 1, chunkCount: chunks.length, sourceWindowCount: chunkWindows.length, visualFrameCount: chunkVisualAssets.length, ...event })
+      });
+      const packetText = String(packet || '').trim();
+      if (packetText.length < Math.max(180, Math.floor(chunk.characterCount * 0.18))) {
+        throw new Error(`Evidence extraction was unexpectedly short for transcript segment ${i + 1}; the original draft was retained.`);
+      }
+      packets.push(packetText);
+      packetWindows.push(chunkWindows.map(window => ({
+        windowId: window.windowId,
+        bucket: window.bucket,
+        startLabel: window.startLabel,
+        endLabel: window.endLabel,
+        cueCount: window.cueCount
+      })));
+      extractionCount++;
+      stage('source-map-complete', {
+        chunk: i + 1,
+        chunkCount: chunks.length,
+        inputCharacters: chunk.characterCount,
+        outputCharacters: packetText.length,
+        sourceWindowsMapped: chunkWindows.length
+      });
+    }
+
+    // Source-window provenance remains in a code-owned sidecar. The model is
+    // never asked to echo IDs, so paraphrasing or omitting a token cannot abort
+    // an otherwise valid evidence packet.
+    const uniqueWindowRecords = records => {
+      const byId = new Map();
+      for (const record of records || []) if (!byId.has(record.windowId)) byId.set(record.windowId, record);
+      return [...byId.values()].sort((a, b) => a.bucket - b.bucket);
+    };
+
+    // Reduce only when needed. The sidecar is merged deterministically while
+    // the model consolidates the text; provenance is not encoded in model output.
+    let level = 0;
+    const ledgerLimit = 36000;
+    while (packets.join('\n\n').length > ledgerLimit && level < 5) {
+      level++;
+      const groups = helpers.chunkKnowledgeBlocks(packets, 24000);
+      if (!groups.length) throw new Error('The evidence ledger could not be safely consolidated; the original draft was retained.');
+      const reduced = [];
+      const reducedWindows = [];
+      let packetCursor = 0;
+      for (let g = 0; g < groups.length; g++) {
+        if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
+        const group = groups[g];
+        const groupPackets = packetWindows.slice(packetCursor, packetCursor + group.length);
+        packetCursor += group.length;
+        const groupWindows = uniqueWindowRecords(groupPackets.flat());
+        const sourceRanges = groupWindows.map(x => `${x.startLabel}–${x.endLabel} (${x.cueCount} cues)`).join('\n');
+        const groupText = group.join('\n\n');
+        const prompt = `Loss-minimizing consolidation of comprehensive evidence packets. Do not write final notes yet.
+
+SOURCE WINDOWS REPRESENTED IN THIS GROUP (extension-owned metadata):
+${sourceRanges}
+
+EVIDENCE PACKETS:
+<packets>
+${groupText}
+</packets>
+
+Preserve every distinct definition, explanation, motivation, example, analogy, number, claim, caveat, comparison, procedure, course detail and exam detail. Remove only exact duplicates. Do not collapse nuances into vague summaries. Keep source timestamps attached to the evidence. The extension tracks source-window coverage separately; do not reproduce machine-generated IDs, hidden markers, or tokens. Add no external knowledge. Return Markdown only.`;
+        const result = await this.generateNotesStream({
+          videoTitle,
+          currentTimestamp: `evidence consolidation level ${level}`,
+          transcriptChunk: groupText,
+          modeLabel: 'Loss-minimizing evidence consolidation',
+          promptOverride: prompt,
+          systemPromptOverride: systemPrompt,
+          maxOutputTokens: 8192,
+          signal,
+          onDiagnostics: event => stage('source-reduce-attempt', { level, group: g + 1, groupCount: groups.length, sourceWindowCount: groupWindows.length, ...event })
+        });
+        const resultText = String(result || '').trim();
+        if (resultText.length < Math.max(500, Math.floor(groupText.length * 0.22))) {
+          throw new Error(`Evidence consolidation was unexpectedly short for group ${g + 1}; the original draft was retained.`);
+        }
+        reduced.push(resultText);
+        reducedWindows.push(groupWindows);
+        reductionCount++;
+        stage('source-reduce-complete', { level, group: g + 1, groupCount: groups.length, inputCharacters: groupText.length, outputCharacters: resultText.length, sourceWindowsMapped: groupWindows.length });
+      }
+      if (packetCursor !== packets.length) throw new Error('Evidence consolidation did not account for every source packet.');
+      const previousSize = packets.join('\n\n').length;
+      const nextSize = reduced.join('\n\n').length;
+      if (nextSize >= previousSize && level >= 2) throw new Error('Hierarchical consolidation is not reducing the evidence safely. The original draft was retained.');
+      packets = reduced;
+      packetWindows = reducedWindows;
+    }
+
+    const mappedWindowRecords = uniqueWindowRecords(packetWindows.flat());
+    const mappedWindowIds = new Set(mappedWindowRecords.map(x => x.windowId));
+    const missingMappedWindows = coverageWindows.filter(x => !mappedWindowIds.has(x.windowId));
+    if (missingMappedWindows.length) {
+      throw new Error(`The evidence ledger is missing ${missingMappedWindows.length} source windows after extraction/consolidation. The original draft was retained.`);
+    }
+    const ledgerSize = packets.join('\n\n').length;
+    if (ledgerSize > ledgerLimit) throw new Error('The lecture evidence is still too large for safe final synthesis. The original draft was retained.');
+
+    const evidence = packets.map((packet, index) => {
+      const windows = uniqueWindowRecords(packetWindows[index] || []);
+      const rangeLabel = windows.length ? `${windows[0].startLabel}–${windows[windows.length - 1].endLabel}` : 'unknown range';
+      const windowList = windows.map(x => `${x.startLabel}–${x.endLabel}`).join(', ');
+      return `### Evidence packet ${index + 1} (${rangeLabel})\nSource windows represented: ${windowList}\n\n${packet}`;
+    }).join('\n\n');
+
+    if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
+    const rangeManifest = coverageWindows.map(x => `${x.startLabel}–${x.endLabel} (${x.cueCount} transcript cues)`).join('\n');
+    const sourceManifest = packets.map((packet, index) => {
+      const windows = uniqueWindowRecords(packetWindows[index] || []);
+      return `Evidence packet ${index + 1}: ${windows.length ? `${windows[0].startLabel}–${windows[windows.length - 1].endLabel}` : 'unknown range'}; ${windows.length} source windows`;
+    }).join('\n');
+    const styleReference = `REFERENCE EXPORT STYLE — reproduce the FORMAT, not the example's subject matter:
+
+### Core Concept
+
+- State the concept directly using only information supported by the lecture.
+    - Put the explanation, reason, qualification, and source-supported examples beneath this parent point.
+- **[Key Insight]** Use a bracketed callout only for an especially useful distinction or conclusion.
+
+### Applying the Concept
+
+- Group related ideas under a descriptive topic heading instead of splitting one concept across several overlapping headings.
+- Place examples and analogies beneath the concept they explain.
+- Use a comparison table only when the lecture actually compares alternatives.
+
+FORMAT RULES OBSERVED IN THE REFERENCE:
+- Use descriptive ### topic headings and occasional #### subheadings; do not make a heading for every timestamp or every secondary explanation.
+- Use the reference's nested bullet structure with Markdown hyphen bullets. Nest supporting details four spaces below the parent bullet.
+- Use bold bracketed labels such as **[Definition]**, **[Teaching Strategy]**, **[Key Insight]**, or **[Example]** selectively. Most bullets should be plain statements; a callout is not a prefix required for every concept or example. As a rule of thumb, use no more than one callout in a main topic section unless a second label adds a genuinely different function.
+- Avoid repeated sections: explain a concept once, then add distinct details/examples as nested bullets in that same section.
+- Put standalone formulas in display LaTeX. Use comparison tables only for genuine comparisons.
+- Use a Mermaid mindmap/flowchart when the lecture presents a clear relationship, classification, or process. In particular, when several parallel real-world examples illustrate the same abstract concept, a compact mindmap may group those examples under that concept. Do not invent extra examples or categories.
+- Use blockquotes sparingly for a memorable instructor statement or key takeaway.
+- The reference is topic-organized, detailed, and explanatory—not a chronological transcript and not a short executive summary.`;
+
+    const finalPrompt = `Create the final study notes for this captured lecture segment in the editorial style of the supplied HoverNotes reference export.
+
+VIDEO TITLE (metadata only): ${videoTitle || 'Untitled lecture'}
+CAPTURED THROUGH: ${stopTime || 'the captured stopping point'}
+
+${styleReference}
+
+SOURCE PACKET MAP — provenance is maintained by the extension and does not need to appear as IDs in the notes:
+${sourceManifest}
+
+SOURCE COVERAGE WINDOWS — every non-empty interval is represented in the evidence ledger. Use all relevant material, but group it by concept rather than by time:
+${rangeManifest}
+
+EVIDENCE LEDGER — this is the factual source. Preserve all distinct instructional content:
+<lecture_evidence>
+${evidence}
+</lecture_evidence>
+
+OPTIONAL SCREENSHOT PLACEHOLDERS:
+${assetInstructions}
+
+FINAL EDITORIAL INSTRUCTIONS:
+1. Organize the notes by concepts actually taught, following the source's topic progression. Merge closely related points under one coherent topic heading, but preserve a separate heading when the instructor moves to a genuinely different teaching objective or concept.
+2. Do not collapse several distinct lecture topics into one broad heading merely to reduce heading count. Equally, do not split one concept into separate headings for its definition, importance, examples, practical implication, and restatement when these belong together. Use nested bullets to express those relationships. The source-length heading estimate is guidance only, never a numerical quota.
+3. Preserve course overview and exam-strategy information that is actually spoken. Preserve instructor background only if explicitly stated in the transcript. Do not use the video description, YouTube metadata, prior AI drafts, or external knowledge to add facts.
+4. Match the reference's information hierarchy: concise parent bullets state the point; nested bullets carry explanations, reasons, examples, analogies, operations, and qualifications. Do not promote every supporting detail to a top-level bullet.
+5. Use bold bracketed labels sparingly. Most bullets should begin with plain text. Normally use one or two bracketed callouts per main topic heading at most; avoid labelling every definition, analogy, or conclusion. Do not create multiple labels for the same underlying idea.
+6. Consolidate repeated wording across the entire capture. State each definition/formula/core conclusion once, then add distinct details under it. Preserve all distinct information; remove only true repetition and empty restatements. Do not pad the notes with repeated transitions or generic conclusions.
+7. When three or more parallel examples illustrate the same abstract idea and their relationship is explicit in the source, include a compact Mermaid mindmap or flowchart that groups them beneath that idea. Use only source-supported labels/examples; do not force a diagram where no clear relationship exists.
+8. No word-count ratio and no arbitrary compression target. Keep the note as concise as possible while retaining every distinct substantive point. Do not expand a source point into general textbook teaching.
+9. Use a table, equation, code fence, Mermaid diagram, or blockquote only when supported and useful. Never invent code, formulas, complexity, examples, or a diagram's relationships.
+10. Do not put timestamps in ordinary headings or bullets. Screenshots are restored by the extension.
+11. Do not include YAML frontmatter or repeat the video title; the extension preserves both.
+12. Do not include internal IDs, source-window codes, or synthetic marker tokens in the final document. Source provenance is tracked by the extension outside the generated Markdown.
+13. Return only the Markdown body, without an introduction, conclusion about the video, or outer code fence.
+
+FINAL COVERAGE AUDIT:
+Before responding, compare the notes with every source packet and every source-window range. Preserve all distinct substantive teaching points across the entire captured interval. Do not satisfy coverage with generic wording or one vague bullet. The output must be comprehensive lecture notes in the supplied reference's style, not a summary.`;
+
+    stage('final-render-start', {
+      strategy: 'evidence-first-all-lengths',
+      inputCharacters: evidence.length,
+      sourceTranscriptCharacters: transcript.length,
+      rawSourceTranscriptCharacters: rawTranscript.length,
+      normalizedSourceTranscriptCharacters: transcript.length,
+      sourcePacketCount: packets.length,
+      coverageWindowCount: mappedWindowRecords.length,
+      visualAssets: visualTokens.length,
+      cachedVisualFrames: visualAssets.filter(asset => Boolean(asset?.dataUrl)).length,
+      ignoredVideoDescriptionCharacters: String(videoDescription || '').length,
+      ignoredSupplementaryVisualNotesCharacters: String(supplementaryVisualNotes || '').length,
+      extractionCount,
+      reductionCount
+    });
+    const renderStartedAt = performance.now();
+    let generated = await this.generateNotesStream({
+      videoTitle,
+      currentTimestamp: `through ${stopTime || 'the captured stopping point'}`,
+      transcriptChunk: '',
+      modeLabel: 'Reference-calibrated source-grounded study-note rendering',
+      promptOverride: finalPrompt,
+      systemPromptOverride: systemPrompt,
+      maxOutputTokens: 8192,
+      signal,
+      onDiagnostics: event => stage('final-render-attempt', event)
+    });
+
+    // A heading-per-time-window floor rejected coherent notes even when the
+    // model had preserved the lecture. Validate basic document integrity here;
+    // treat topic count and editorial form as recoverable style checks below.
+    const validation = helpers.validateOutput(generated, transcript.length, {
+      minimumRatio: 0.10,
+      minimumCharacters: Math.min(9000, Math.max(500, Math.floor(transcript.length * 0.25))),
+      minimumHeadings: 1,
+      allowTimestampHeadings: true,
+      requireNestedBullets: false,
+      requireBoldLabels: false,
+      requireHyphenBullets: true
+    });
+    if (!validation.valid) throw new Error(validation.reason);
+
+    // Reference-style guard: the previous renderer treated the presence of at
+    // least one callout as success, even when nearly every bullet was labelled.
+    // Run one bounded editorial repair only when callout density is excessive.
+    // The source-to-note semantic audit below then checks that this style pass
+    // did not remove any distinct source-supported content.
+    let candidateForAudit = validation.markdown;
+    const initialStyleMetrics = helpers.measureReferenceStyle(candidateForAudit);
+    const preferredHeadingCount = helpers.minimumTopicHeadings(lines, 30);
+    const editorialWarnings = helpers.editorialStyleWarnings(candidateForAudit, preferredHeadingCount);
+    stage('editorial-style-measured', {
+      metrics: initialStyleMetrics,
+      warnings: editorialWarnings
+    });
+    if (editorialWarnings.length) {
+      const warningCodes = new Set(editorialWarnings.map(item => item.code));
+      const recoveryInstructions = [];
+      if (warningCodes.has('timestamp-led-headings')) recoveryInstructions.push('- Replace every timestamp-led section heading with a concise descriptive topic heading. Keep timestamps only for preserved screenshot anchors.');
+      if (warningCodes.has('fewer-than-preferred-topic-headings')) recoveryInstructions.push('- Review whether several distinct teaching objectives are currently collapsed under broad headings. Split only genuinely distinct topics; do not create one heading per time interval or split a concept from its examples. The heuristic count is not a target quota.');
+      if (warningCodes.has('missing-nested-hierarchy')) recoveryInstructions.push('- Restore the reference hierarchy: concise parent hyphen bullets followed by four-space nested bullets for explanations, reasons, examples, analogies and qualifications.');
+      if (warningCodes.has('missing-selective-callouts')) recoveryInstructions.push('- Add a few bold bracketed labels only where they genuinely help identify a definition, teaching strategy or key insight. Most bullets must remain unlabelled.');
+      if (warningCodes.has('excessive-bold-callouts')) recoveryInstructions.push('- Convert routine labelled bullets into plain statements. Retain only distinct, useful callouts (normally no more than two per main topic section).');
+      const styleRepairPrompt = `EDITORIAL STRUCTURE RECOVERY — preserve the complete source meaning while aligning the candidate with the supplied HoverNotes formatting contract.
+
+STYLE FINDINGS:
+${JSON.stringify(editorialWarnings, null, 2)}
+
+APPLY THESE TARGETED CORRECTIONS:
+${recoveryInstructions.join('\n')}
+
+REFERENCE STYLE REMINDERS:
+- Group related material under coherent topic headings; combine headings that merely split a definition, its motivation, examples, and its implications.
+- Use concise parent hyphen bullets and four-space nested bullets for supporting details.
+- Use bold bracketed callouts selectively. Most bullets must be plain statements, not labelled callouts.
+- Group parallel analogies/examples beneath the concept they explain. Add a compact Mermaid mindmap/flowchart when several source-stated examples clearly illustrate one common concept; do not add unsupported examples or categories.
+- Keep the correct display equation, existing Mermaid diagrams, and screenshot placeholders if present.
+
+SOURCE EVIDENCE — sole factual authority:
+<lecture_evidence>
+${evidence}
+</lecture_evidence>
+
+CURRENT CANDIDATE NOTES:
+<candidate_notes>
+${candidateForAudit}
+</candidate_notes>
+
+REFINEMENT RULES:
+1. Preserve every distinct source-supported fact, explanation, reason, analogy, example, numerical detail, qualification, and teaching point. Do not shorten by deleting content.
+2. Remove only repeated wording or repeated statements of the same point. Consolidate related sections and nested structure without losing distinctions.
+3. Reduce excessive bracketed labels by converting routine labelled bullets into plain, direct statements. Keep only labels that meaningfully improve scanning.
+4. Do not invent or import facts, examples, formulas, categories, or exam advice.
+5. Keep source-supported equations, diagrams and visual placement markers. Do not delete screenshot placeholders.
+6. Return the complete corrected Markdown body only. No frontmatter, title, explanation, JSON, or outer code fence.`;
+
+      stage('editorial-repair-start', {
+        warningCount: editorialWarnings.length,
+        before: initialStyleMetrics
+      });
+      try {
+        const styleRepaired = await this.generateNotesStream({
+          videoTitle,
+          currentTimestamp: `editorial refinement through ${stopTime || 'captured boundary'}`,
+          transcriptChunk: '',
+          modeLabel: 'Reference-style editorial refinement',
+          promptOverride: styleRepairPrompt,
+          systemPromptOverride: systemPrompt,
+          maxOutputTokens: 8192,
+          signal,
+          onDiagnostics: event => stage('editorial-repair-attempt', event)
+        });
+        const finalHeadingFloor = coverageWindows.length >= 3 ? 2 : 1;
+        const styleValidation = helpers.validateOutput(styleRepaired, transcript.length, {
+          minimumRatio: 0.10,
+          minimumCharacters: Math.min(9000, Math.max(500, Math.floor(transcript.length * 0.25))),
+          minimumHeadings: finalHeadingFloor,
+          requireNestedBullets: coverageWindows.length >= 3,
+          requireBoldLabels: coverageWindows.length >= 3,
+          requireHyphenBullets: true
+        });
+        const refinedMetrics = styleValidation.valid
+          ? helpers.measureReferenceStyle(styleValidation.markdown)
+          : null;
+        const refinedWarnings = styleValidation.valid
+          ? helpers.editorialStyleWarnings(styleValidation.markdown, preferredHeadingCount)
+          : [];
+        const initialWarningCodes = new Set(editorialWarnings.map(item => item.code));
+        const refinedHardWarnings = refinedWarnings.filter(item => item.severity === 'hard');
+        const headingImproved = !initialWarningCodes.has('fewer-than-preferred-topic-headings') ||
+          refinedMetrics?.mainTopicHeadings > initialStyleMetrics.mainTopicHeadings ||
+          refinedMetrics?.mainTopicHeadings >= preferredHeadingCount;
+        const calloutsImproved = !initialWarningCodes.has('excessive-bold-callouts') ||
+          (refinedMetrics && refinedMetrics.boldCallouts < initialStyleMetrics.boldCallouts);
+        const styleRepairUseful = headingImproved && calloutsImproved && refinedHardWarnings.length === 0;
+        if (styleValidation.valid && styleRepairUseful) {
+          candidateForAudit = styleValidation.markdown;
+          stage('editorial-repair-accepted', {
+            before: initialStyleMetrics,
+            after: refinedMetrics,
+            preferredHeadingCount,
+            remainingSoftWarnings: refinedWarnings.filter(item => item.severity !== 'hard'),
+            outputCharacters: candidateForAudit.length
+          });
+        } else {
+          const reason = !styleValidation.valid
+            ? styleValidation.reason
+            : refinedHardWarnings.length
+              ? `The refined candidate still has hard editorial defects: ${refinedHardWarnings.map(item => item.code).join(', ')}.`
+              : 'The refinement did not improve the measured structural issues; the original final render was retained.';
+          stage('editorial-repair-not-applied', {
+            reason,
+            before: initialStyleMetrics,
+            after: refinedMetrics,
+            preferredHeadingCount,
+            remainingStyleWarnings: refinedWarnings
+          });
+          const initialHardWarnings = editorialWarnings.filter(item => item.severity === 'hard');
+          if (initialHardWarnings.length) throw new Error(`Editorial structure recovery failed: ${initialHardWarnings.map(item => item.code).join(', ')}. The original incremental draft was retained.`);
+        }
+      } catch (styleError) {
+        if (signal?.aborted) throw styleError;
+        stage('editorial-repair-failed', {
+          reason: String(styleError?.message || styleError),
+          fallback: 'original-final-render-retained'
+        });
+        const initialHardWarnings = editorialWarnings.filter(item => item.severity === 'hard');
+        if (initialHardWarnings.length) {
+          throw new Error(`Editorial structure recovery could not repair hard defects (${initialHardWarnings.map(item => item.code).join(', ')}): ${String(styleError?.message || styleError)}. The original incremental draft was retained.`);
+        }
+      }
+    }
+
+    // Run a separate second-pass comparison of the rendered note with the original transcript.
+    // Deterministic source-window assignment proves provenance only; this review
+    // checks whether the meaning of each original source segment survived.
+    const auditBatches = helpers.buildSemanticAuditBatches(chunks, 3);
+    const auditSystemPrompt = `You are a separate second-pass educational-content coverage reviewer using the same configured AI provider as the note writer. You must evaluate the candidate document critically; this is a separate review pass, not an independent third-party model.
+
+SOURCE RULES:
+- The timestamped transcript is the authoritative record of spoken lecture content.
+- Attached original frames may support only clearly visible and legible slide content.
+- Do not use video titles, descriptions, channel metadata, external knowledge, or assumptions.
+- Treat instructor opinions, guarantees, and personal claims as claims, not verified facts.
+
+AUDIT RULES:
+- Identify substantive instructional or course-context points present in this source segment but absent or materially distorted in the candidate notes.
+- Count a point as covered when its meaning is faithfully expressed, even if the wording, heading, or location differs.
+- Do not flag greetings, filler, repeated wording, calls to like/subscribe/comment, or purely administrative chatter.
+- Do retain meaningful course overview, teaching approach, prerequisites, syllabus scope, instructor-stated experience, motivation, conceptual framing, definitions, reasoning, examples, analogies, caveats, and exam context.
+- Do not demand verbatim coverage or one note bullet per transcript cue. Group related ideas when nothing substantive is lost.
+- For unsupported claims, report only a claim that is directly contradicted by this source segment or that clearly adds a specific fact that this segment itself disproves. Do not flag a claim merely because it is absent from this batch: it may be supported by another part of the lecture.
+- Do not critique Markdown style here; this pass evaluates factual coverage only.
+
+Return one valid JSON object and nothing else with this exact shape:
+{"omissions":[{"missing_point":"accurate concise English statement of a missing source-supported point","source_excerpt":"short exact excerpt from supplied transcript","source_timestamp":"MM:SS"}],"unsupported_claims":[{"claim":"short exact excerpt from candidate notes","reason":"why supplied transcript and attached frames do not support it"}]}
+If nothing is missing or unsupported, return {"omissions":[],"unsupported_claims":[]}. Do not add other keys.`;
+
+    const runSemanticAudit = async (candidateMarkdown, passLabel) => {
+      const findings = { omissions: [], unsupportedClaims: [], auditedBatchCount: 0 };
+      for (const batch of auditBatches) {
+        if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
+        const batchVisualAssets = visualAssets.filter(asset => {
+          if (!asset?.dataUrl || !Number.isFinite(batch.startTime) || !Number.isFinite(batch.endTime)) return false;
+          const seconds = helpers.parseTimestampSeconds(`[${asset.timestamp || ''}]`);
+          return seconds !== null && seconds >= batch.startTime && seconds <= batch.endTime;
+        }).slice(0, 4);
+        const visualManifestForAudit = batchVisualAssets.length
+          ? batchVisualAssets.map(asset => `An original screenshot captured at ${asset.timestamp} is attached in the same order.`).join('\n')
+          : '[No original screenshot is attached for this source batch.]';
+        const auditPrompt = `SECOND-PASS SOURCE-TO-NOTE COVERAGE AUDIT
+
+SOURCE RANGE: ${batch.startLabel}–${batch.endLabel}
+
+ORIGINAL TIMESTAMPED TRANSCRIPT (primary evidence):
+<source_transcript>
+${batch.transcriptText}
+</source_transcript>
+
+ORIGINAL VISUAL EVIDENCE:
+${visualManifestForAudit}
+
+CANDIDATE FINAL STUDY NOTES (audit against this entire document; other sections may already cover this segment):
+<candidate_notes>
+${candidateMarkdown}
+</candidate_notes>
+
+Compare every substantive point in the source range with the entire candidate note. Report material omissions and only claims directly contradicted by the supplied source range. Do not label a claim unsupported merely because it is absent from this batch; it may be supported elsewhere in the lecture. A paraphrase under a different topic heading counts as covered. Do not flag a fact just because its exact timestamp is not printed. Do not require marketing calls-to-action or filler. Preserve course details and the instructor's explicitly stated background/claims when relevant, as the reference export does.
+
+Return the exact JSON schema required by your system instructions. Empty arrays mean no findings. Do not use internal IDs or Markdown fences.`;
+
+        const requestAudit = async (retry = false) => {
+          const retryInstruction = retry
+            ? '\n\nRETRY: The prior response was not valid JSON. Return exactly one syntactically valid JSON object with both required arrays. No prose, no Markdown fence.'
+            : '';
+          const raw = await this.generateNotesStream({
+            videoTitle,
+            currentTimestamp: `${batch.startLabel}–${batch.endLabel}`,
+            transcriptChunk: batch.transcriptText,
+            frameImages: batchVisualAssets.map(asset => asset.dataUrl),
+            modeLabel: `Second-pass semantic coverage audit (${passLabel})`,
+            promptOverride: auditPrompt + retryInstruction,
+            systemPromptOverride: auditSystemPrompt,
+            maxOutputTokens: 3072,
+            signal,
+            onDiagnostics: event => stage('semantic-audit-attempt', {
+              pass: passLabel,
+              batch: batch.index + 1,
+              batchCount: auditBatches.length,
+              sourceRange: `${batch.startLabel}–${batch.endLabel}`,
+              retry,
+              ...event
+            })
+          });
+          return helpers.parseSemanticAuditResponse(raw);
+        };
+
+        let auditResult;
+        try {
+          auditResult = await requestAudit(false);
+        } catch (firstAuditError) {
+          if (signal?.aborted) throw firstAuditError;
+          stage('semantic-audit-json-retry', {
+            pass: passLabel,
+            batch: batch.index + 1,
+            sourceRange: `${batch.startLabel}–${batch.endLabel}`,
+            reason: firstAuditError?.message || 'invalid audit response'
+          });
+          auditResult = await requestAudit(true);
+        }
+
+        findings.omissions.push(...auditResult.omissions.map(item => ({
+          ...item,
+          sourceRange: `${batch.startLabel}–${batch.endLabel}`,
+          sourceTranscript: batch.transcriptText
+        })));
+        findings.unsupportedClaims.push(...auditResult.unsupportedClaims.map(item => ({
+          ...item,
+          sourceRange: `${batch.startLabel}–${batch.endLabel}`,
+          sourceTranscript: batch.transcriptText
+        })));
+        findings.auditedBatchCount++;
+        stage('semantic-audit-batch-complete', {
+          pass: passLabel,
+          batch: batch.index + 1,
+          batchCount: auditBatches.length,
+          sourceRange: `${batch.startLabel}–${batch.endLabel}`,
+          omissionCount: auditResult.omissions.length,
+          unsupportedClaimCount: auditResult.unsupportedClaims.length
+        });
+      }
+      return findings;
+    };
+
+    let semanticAudit = await runSemanticAudit(candidateForAudit, 'initial');
+    stage('semantic-audit-complete', {
+      pass: 'initial',
+      auditedBatchCount: semanticAudit.auditedBatchCount,
+      omissionCount: semanticAudit.omissions.length,
+      unsupportedClaimCount: semanticAudit.unsupportedClaims.length
+    });
+
+    let finalBody = candidateForAudit;
+    let semanticRepairCount = 0;
+    if (semanticAudit.omissions.length || semanticAudit.unsupportedClaims.length) {
+      const repairFindings = {
+        omissions: semanticAudit.omissions.map(({ point, sourceExcerpt, sourceTimestamp, sourceRange }) => ({ point, sourceExcerpt, sourceTimestamp, sourceRange })),
+        unsupportedClaims: semanticAudit.unsupportedClaims.map(({ point, reason, sourceRange }) => ({ claim: point, reason, sourceRange }))
+      };
+      const repairSourceRanges = [...new Set([
+        ...semanticAudit.omissions.map(item => item.sourceRange),
+        ...semanticAudit.unsupportedClaims.map(item => item.sourceRange)
+      ])];
+      const repairSourceText = auditBatches
+        .filter(batch => repairSourceRanges.includes(`${batch.startLabel}–${batch.endLabel}`))
+        .map(batch => `### Original source ${batch.startLabel}–${batch.endLabel}\n${batch.transcriptText}`)
+        .join('\n\n');
+      const repairPrompt = `TARGETED SEMANTIC REPAIR OF THE CANDIDATE STUDY NOTES
+
+The second-pass source-to-note audit found the following issues. Repair only these issues while preserving all already-correct content and the reference style.
+
+AUDIT FINDINGS (JSON):
+${JSON.stringify(repairFindings, null, 2)}
+
+RELEVANT ORIGINAL SOURCE SEGMENTS:
+<original_sources>
+${repairSourceText}
+</original_sources>
+
+CURRENT CANDIDATE DOCUMENT:
+<candidate_notes>
+${finalBody}
+</candidate_notes>
+
+REPAIR RULES:
+1. Add every listed missing point only when supported by the quoted original transcript. Incorporate it under the most relevant existing concept heading; create a new topic heading only if no existing heading fits.
+2. Remove or correct each listed unsupported claim. Do not remove a claim if the supplied source actually supports it; the source excerpts take precedence over the audit's interpretation.
+3. Do not rewrite, shorten, summarize, reorder, or delete unrelated correct material.
+4. Preserve nested hyphen bullets and use bold bracketed concept labels selectively (normally no more than two per main topic heading), along with equations, tables, code, Mermaid diagrams, and screenshot placement hints where still relevant. Consolidate repeated headings and concepts without deleting distinct source details.
+5. Do not add outside knowledge or make claims beyond the supplied source.
+6. Return the complete corrected Markdown body only, with no frontmatter, title, explanation, JSON, or outer code fence.`;
+
+      const repaired = await this.generateNotesStream({
+        videoTitle,
+        currentTimestamp: `semantic repair through ${stopTime || 'captured boundary'}`,
+        transcriptChunk: repairSourceText,
+        modeLabel: 'Targeted semantic coverage repair',
+        promptOverride: repairPrompt,
+        systemPromptOverride: systemPrompt,
+        maxOutputTokens: 8192,
+        signal,
+        onDiagnostics: event => stage('semantic-repair-attempt', event)
+      });
+      const repairedValidation = helpers.validateOutput(repaired, transcript.length, {
+        minimumRatio: 0.10,
+        minimumCharacters: Math.min(9000, Math.max(500, Math.floor(transcript.length * 0.25))),
+        minimumHeadings: coverageWindows.length >= 3 ? 2 : 1,
+        requireNestedBullets: coverageWindows.length >= 3,
+        requireBoldLabels: coverageWindows.length >= 3,
+        requireHyphenBullets: true
+      });
+      if (!repairedValidation.valid) throw new Error(`Semantic repair returned structurally invalid notes: ${repairedValidation.reason}`);
+      finalBody = repairedValidation.markdown;
+      semanticRepairCount = 1;
+      stage('semantic-repair-complete', {
+        outputCharacters: finalBody.length,
+        repairedOmissionCount: semanticAudit.omissions.length,
+        removedUnsupportedClaimCount: semanticAudit.unsupportedClaims.length
+      });
+
+      const verificationAudit = await runSemanticAudit(finalBody, 'post-repair-verification');
+      stage('semantic-audit-complete', {
+        pass: 'post-repair-verification',
+        auditedBatchCount: verificationAudit.auditedBatchCount,
+        omissionCount: verificationAudit.omissions.length,
+        unsupportedClaimCount: verificationAudit.unsupportedClaims.length
+      });
+      if (verificationAudit.omissions.length || verificationAudit.unsupportedClaims.length) {
+        throw new Error(`Second-pass semantic audit still found ${verificationAudit.omissions.length} omissions and ${verificationAudit.unsupportedClaims.length} unsupported claims after one repair pass. The original incremental draft was retained.`);
+      }
+      semanticAudit = verificationAudit;
+    }
+
+    stage('semantic-coverage-accepted', {
+      auditedBatchCount: semanticAudit.auditedBatchCount,
+      semanticRepairCount,
+      remainingOmissions: 0,
+      remainingUnsupportedClaims: 0
+    });
+    const cleanBody = helpers.stripInternalMarkers(finalBody, visualTokens);
+    if (cleanBody.length < Math.min(600, Math.max(250, Math.floor(transcript.length * 0.20)))) throw new Error('The final document was unexpectedly short after source and screenshot metadata cleanup. The original draft was retained.');
+    stage('final-render-complete', {
+      durationMs: Math.round(performance.now() - renderStartedAt),
+      totalPipelineMs: Math.round(performance.now() - startedAt),
+      outputCharacters: cleanBody.length,
+      sourceTranscriptCharacters: transcript.length,
+      rawSourceTranscriptCharacters: rawTranscript.length,
+      extractionCount,
+      reductionCount,
+      coverageWindowCount: coverageWindows.length,
+      mappedSourceWindowCount: mappedWindowRecords.length,
+      semanticAuditBatchCount: semanticAudit.auditedBatchCount,
+      semanticRepairCount,
+      referenceStyleMetrics: helpers.measureReferenceStyle(cleanBody),
+      semanticValidation: 'passed',
+      validation: 'passed'
+    });
+    return cleanBody;
+  }
+
   emitDiagnostics(callback, event) {
     if (typeof callback !== 'function') return;
     try {
@@ -779,30 +1499,30 @@ CHRONOLOGY AND ASSET RULES:
   }
 
   // Internal SSE Stream Implementation
-  async streamGeminiSSE({ apiKey, model, promptText, frameBase64, onChunk, onComplete, onDiagnostics, signal }) {
+  async streamGeminiSSE({ apiKey, model, promptText, frameBase64, frameImages = [], onChunk, onComplete, onDiagnostics, signal, systemPrompt = this.systemPrompt, maxOutputTokens = 8192 }) {
     const requestStartedAt = performance.now();
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
 
     const parts = [{ text: promptText }];
 
-    if (frameBase64) {
-      const cleanBase64 = frameBase64.replace(/^data:image\/(png|jpeg|jpg);base64,/, '');
-      parts.unshift({
-        inlineData: {
-          mimeType: 'image/jpeg',
-          data: cleanBase64
-        }
-      });
+    const imageInputs = [
+      ...(Array.isArray(frameImages) ? frameImages : []),
+      ...(frameBase64 ? [frameBase64] : [])
+    ].filter(Boolean).slice(0, 4);
+    for (const imageInput of imageInputs) {
+      const mimeMatch = String(imageInput).match(/^data:(image\/(?:png|jpeg|jpg|webp));base64,/i);
+      const cleanBase64 = String(imageInput).replace(/^data:image\/(png|jpeg|jpg|webp);base64,/i, '');
+      parts.push({ inlineData: { mimeType: mimeMatch?.[1] || 'image/jpeg', data: cleanBase64 } });
     }
 
     const payload = {
       contents: [{ role: 'user', parts }],
       systemInstruction: {
-        parts: [{ text: this.systemPrompt }]
+        parts: [{ text: systemPrompt }]
       },
       generationConfig: {
         temperature: 0.2,
-        maxOutputTokens: 8192,
+        maxOutputTokens,
         ...(model === this.primaryModel ? { thinkingConfig: { thinkingBudget: 0 } } : {})
       }
     };
@@ -985,25 +1705,29 @@ CHRONOLOGY AND ASSET RULES:
   }
 
   // Internal Custom OpenAI-compatible Fallback Stream
-  async streamOpenAIExtension({ promptText, frameBase64, onChunk, onComplete, onDiagnostics, signal }) {
+  async streamOpenAIExtension({ promptText, frameBase64, frameImages = [], onChunk, onComplete, onDiagnostics, signal, systemPrompt = this.systemPrompt, maxOutputTokens = 4096 }) {
     const requestStartedAt = performance.now();
     let endpoint = this.customEndpointUrl.replace(/\/+$/, '');
     if (!endpoint.endsWith('/chat/completions')) endpoint += '/chat/completions';
 
     const userContent = [{ type: 'text', text: promptText }];
-    if (frameBase64) {
-      const dataUri = frameBase64.startsWith('data:') ? frameBase64 : `data:image/jpeg;base64,${frameBase64}`;
+    const imageInputs = [
+      ...(Array.isArray(frameImages) ? frameImages : []),
+      ...(frameBase64 ? [frameBase64] : [])
+    ].filter(Boolean).slice(0, 4);
+    for (const imageInput of imageInputs) {
+      const dataUri = String(imageInput).startsWith('data:') ? imageInput : `data:image/jpeg;base64,${imageInput}`;
       userContent.push({ type: 'image_url', image_url: { url: dataUri } });
     }
 
     const payload = {
       model: this.customModel || 'gpt-4o-mini',
       messages: [
-        { role: 'system', content: this.systemPrompt },
+        { role: 'system', content: systemPrompt },
         { role: 'user', content: userContent }
       ],
       stream: true,
-      max_tokens: 4096,
+      max_tokens: Math.min(8192, Math.max(1024, Number(maxOutputTokens) || 4096)),
       temperature: 0.2
     };
 
