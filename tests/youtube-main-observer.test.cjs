@@ -116,7 +116,7 @@ function inbound(type, payload = {}) {
   const bodyMessagesBeforeReplay = emitted.filter(m => m.type === 'CAPTION_BODY').length;
   inbound('REQUEST_CAPTION_BODY', { videoId, languageCode: 'hi', vssId: 'a.hi' });
   const bodyMessagesAfterReplay = emitted.filter(m => m.type === 'CAPTION_BODY').length;
-  assert.equal(bodyMessagesAfterReplay, bodyMessagesBeforeReplay + 1, 'a player response observed before the extension request should be replayed from the in-memory cache');
+  assert.equal(bodyMessagesAfterReplay, bodyMessagesBeforeReplay, 'a player response must not be replayed from unvalidated raw cache');
 
   const xhr = new window.XMLHttpRequest();
   xhr.open('GET', tokenBearingPlayerUrl);

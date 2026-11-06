@@ -71,7 +71,8 @@ function mainMessage(data) {
   for (let i = 0; i < 100 && !outgoing.some(m => m.type === 'REQUEST_CAPTION_BODY'); i++) {
     await new Promise(resolve => setTimeout(resolve, 5));
   }
-  assert.ok(outgoing.some(m => m.type === 'REQUEST_CAPTION_BODY'), 'isolated script must request the selected player caption track');
+  const reqMsg = outgoing.find(m => m.type === 'REQUEST_CAPTION_BODY');
+  assert.ok(reqMsg, 'isolated script must request the selected player caption track');
 
   const spoken = 'न'.repeat(13_969_317);
   const body = JSON.stringify({
@@ -81,9 +82,17 @@ function mainMessage(data) {
   const totalChunks = Math.ceil(body.length / chunkSize);
   const transferId = 'large-transfer-test';
   mainMessage({
-    type: 'CAPTION_BODY_START', videoId, languageCode: 'hi', transferId,
-    status: 200, contentType: 'application/json; charset=UTF-8', transport: 'fetch',
-    responseCharacters: body.length, totalChunks
+    type: 'CAPTION_BODY_START',
+    requestId: reqMsg.requestId,
+    vssId: reqMsg.vssId,
+    videoId,
+    languageCode: 'hi',
+    transferId,
+    status: 200,
+    contentType: 'application/json; charset=UTF-8',
+    transport: 'fetch',
+    responseCharacters: body.length,
+    totalChunks
   });
   for (let index = 0; index < totalChunks; index++) {
     mainMessage({

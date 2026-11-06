@@ -1,6 +1,32 @@
-# My HoverNotes — v1.0.25
+# My HoverNotes — v1.0.29
 
-Build: 1.0.25
+Build: 1.0.29
+
+## v1.0.29 — Final request-correlation correction & lifecycle cleanup
+
+v1.0.29 resolves subtle request correlation and lifecycle cleanup defects identified in production audits:
+- **Removal of uncorrelated response fallback:** Removed legacy single-waiter fallback in `deliverCaptionBody()`. Every response must carry a non-empty `requestId` matching an active waiter. Mismatched or unrequested responses are strictly rejected.
+- **Strict MAIN-world request context matching:** Exact `vssId` matching is required whenever present in the URL or context, never falling back to kind or language on mismatch. Language fallback is permitted only when no track identity is in the URL and exactly one candidate exists. Conflicting responses are dropped in `captureTimedText()` before reaching the isolated script.
+- **Explicit cancellation & lifecycle cleanup:** Waiter timeouts issue `CANCEL_CAPTION_REQUEST` to the MAIN world, immediately deleting active request contexts. Video navigations clear active contexts in both worlds. Late responses from cancelled requests are dropped.
+- **Concurrent chunk-transfer isolation:** Removed blanket transfer wiping on `CAPTION_BODY_START`. Transfers are isolated by `transferId` with bounded concurrent transfers (`MAX_ACTIVE_TRANSFERS = 4`), preventing interleaved streams from corrupting each other.
+- **Deterministic track selection & policy realism:** Preserved explicit `vssId` and `kind` across retrieval and activation. Documented that the hypothesis of auto-generated `a.hi` being the intended track on `2o2vX0ZqQ_Y` remains unverified live evidence because live tracklists were not logged at failure time.
+
+## v1.0.28 — YouTube caption ingestion lifecycle & track selection repair
+
+v1.0.28 eliminates stale and uncorrelated YouTube caption ingestion failures by:
+- Implementing request-correlated timed-text retrieval with unique `requestId` tracking through player bridge initiation, response snapshotting, chunk transfer, and waiter resolution. Older or uncorrelated responses can never resolve a newer pending request.
+- Enforcing exact `vssId` matching first (e.g., distinguishing auto-generated Hindi `a.hi` from manual Hindi `.hi`), failing closed if an explicit `vssId` is requested but missing.
+- Removing unvalidated raw-response caching and replay in both the MAIN world and isolated content scripts; only validated timestamped cues enter `transcriptCache`, strictly isolated by `${videoId}::${trackKey}`.
+- Adding bounded fresh recovery: exactly one controlled fresh retry on 0-cue failure with a new `requestId`, forced player track reactivation, and zero progress advance if retry also produces 0 cues.
+- Adding full-pass $O(N)$ JSON3 census diagnostics calculating non-whitespace character volume, segment text field frequencies (`utf8`, `utf16`, `text`), text length percentiles, and timestamp validity without logging caption text or secrets.
+
+## v1.0.27 — YouTube JSON3 event schema census diagnostics
+
+v1.0.27 adds in-memory, privacy-safe structural event schema census diagnostics to inspect unsupported YouTube caption JSON responses when parsing produces zero cues. It analyzes the full `events` collection for key frequencies, segment-like fields, and distinct key signatures, and performs bounded nested sampling to uncover property paths, string leaf lengths, and timestamp-like numeric value ranges without guessing or modifying units. Traversal-node budget limits ensure the YouTube page cannot freeze, and strict redaction guarantees no caption text or credentials are ever logged.
+
+## v1.0.26 — YouTube caption ingestion repair
+
+v1.0.26 resolves YouTube caption-parsing failures by replacing ad-hoc retries with a format-aware dispatcher supporting JSON3, SRV3 XML, legacy XML, and WebVTT. It preserves the `fmt` request metadata across the MAIN-world bridge, distinguishes an absent `fmt` parameter from explicitly supplied formats, correctly dispatches `application/json` responses with absent `fmt` to JSON adapters without forcing XML parsing, isolates multi-format cache entries by format, and outputs privacy-safe schema diagnostics when an unsupported JSON schema is encountered.
 
 ## v1.0.25 — Finalization recovery
 
@@ -42,7 +68,7 @@ The extension continues using the existing Gemini keys, model/fallback configura
 
 ## What this build supports
 
-- YouTube pages with accessible player caption tracks; JSON3 and supported srv3 XML caption responses.
+- YouTube pages with accessible player caption tracks; format-aware parsing for JSON3, SRV3 XML, legacy XML, and WebVTT caption responses with privacy-safe diagnostics for unsupported schemas.
 - Translation of Hindi/Hinglish captions into structured English Markdown notes.
 - Transcript-grounded generation with timestamps, instructor-claim attribution, prior-note context, and streaming output.
 - Automatic locally filtered screenshots, promotional-interval suppression and perceptual duplicate suppression. Screenshot selection is heuristic, not full semantic vision or OCR.

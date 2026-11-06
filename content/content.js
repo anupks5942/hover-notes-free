@@ -12,14 +12,14 @@
   let isSplitActive = false;
   let currentVideoId = '';
   
-  // Transcript cache: videoId -> Array<{ start: number, duration: number, text: string }>
+  // Parsed transcript cache: `${videoId}::${trackKey}` -> Array<{ start: number, duration: number, text: string }>
   const transcriptCache = new Map();
   const transcriptPerformanceCache = new Map();
   // Caption tracks cache: videoId -> Array<CaptionTrack>
   const captionTracksCache = new Map();
   const transcriptDiagnostics = new Map();
+  // Active request waiters: requestId -> waiter
   const captionBodyWaiters = new Map();
-  const lastCaptionBodies = new Map();
   const captionBodyTransfers = new Map();
   const MAX_CAPTION_BODY_CHARS = 40 * 1024 * 1024;
   const captionActivationDiagnostics = new Map();
@@ -148,10 +148,72 @@
 
   function deliverCaptionBody(payload) {
     const videoId = String(payload.videoId || '');
+    const requestId = String(payload.requestId || '');
+    const vssId = String(payload.vssId || '');
     const languageCode = String(payload.languageCode || '');
-    if (!videoId || (currentVideoId && videoId !== currentVideoId)) return;
-    const key = `${videoId}::${languageCode}`;
+    const kind = String(payload.kind || '');
+
+    // 1. Every caption response must carry a non-empty requestId.
+    if (!requestId) {
+      console.warn('[HoverNotes Captions] Dropping caption response: missing requestId', {
+        videoId,
+        hasVssId: Boolean(vssId)
+      });
+      return;
+    }
+
+    // 2. The requestId must match an existing pending waiter.
+    if (!captionBodyWaiters.has(requestId)) {
+      console.warn('[HoverNotes Captions] Dropping caption response: unknown or cancelled requestId', {
+        requestId,
+        videoId
+      });
+      return;
+    }
+
+    const waiter = captionBodyWaiters.get(requestId);
+
+    // 3. Verify videoId matches the waiter.
+    if (waiter.videoId && videoId && waiter.videoId !== videoId) {
+      console.warn('[HoverNotes Captions] Dropping caption response: videoId mismatch', {
+        requestId,
+        expectedVideoId: waiter.videoId,
+        responseVideoId: videoId
+      });
+      return;
+    }
+
+    // 4. If the response supplies vssId, verify it matches the waiter's selected vssId.
+    if (waiter.vssId && vssId && waiter.vssId !== vssId) {
+      console.warn('[HoverNotes Captions] Dropping caption response: vssId mismatch', {
+        requestId,
+        expectedVssId: waiter.vssId,
+        responseVssId: vssId
+      });
+      return;
+    }
+
+    // 5. If the response supplies kind, verify it matches when the waiter has an explicit kind.
+    if (waiter.kind && kind && waiter.kind !== kind) {
+      console.warn('[HoverNotes Captions] Dropping caption response: kind mismatch', {
+        requestId,
+        expectedKind: waiter.kind,
+        responseKind: kind
+      });
+      return;
+    }
+
+    // All validation passed. Remove from pending waiters and clear timer.
+    captionBodyWaiters.delete(requestId);
+    clearTimeout(waiter.timer);
+
     const normalized = {
+      requestId,
+      videoId,
+      vssId,
+      kind,
+      languageCode,
+      format: typeof payload.format === 'string' ? payload.format.trim() : '',
       status: Number(payload.status || 0),
       contentType: String(payload.contentType || ''),
       body: typeof payload.body === 'string' ? payload.body : '',
@@ -160,18 +222,8 @@
       bodyTooLarge: Boolean(payload.bodyTooLarge),
       readError: String(payload.readError || '')
     };
-    lastCaptionBodies.set(key, normalized);
-    while (lastCaptionBodies.size > 2) {
-      lastCaptionBodies.delete(lastCaptionBodies.keys().next().value);
-    }
-    const waiters = captionBodyWaiters.get(key) || [];
-    if (normalized.body.trim() || normalized.status >= 400 || normalized.bodyTooLarge || normalized.readError) {
-      captionBodyWaiters.delete(key);
-      for (const waiter of waiters) {
-        clearTimeout(waiter.timer);
-        waiter.resolve(normalized);
-      }
-    }
+
+    waiter.resolve(normalized);
   }
 
   // MAIN-world bridge responses. The MAIN-world file is declared statically in
@@ -204,36 +256,89 @@
 
     if (message.type === 'CAPTION_TRANSFER_REJECTED') {
       deliverCaptionBody({
-        videoId: String(message.videoId || ''), languageCode: String(message.languageCode || ''),
-        status: 0, body: '', responseCharacters: 0,
+        requestId: String(message.requestId || ''),
+        vssId: String(message.vssId || ''),
+        kind: String(message.kind || ''),
+        videoId: String(message.videoId || ''),
+        languageCode: String(message.languageCode || ''),
+        format: typeof message.format === 'string' ? message.format.trim() : '',
+        status: 0,
+        body: '',
+        responseCharacters: 0,
         readError: String(message.reason || 'Caption transfer was rejected.')
       });
       return;
     }
 
     if (message.type === 'CAPTION_BODY_START') {
+      const requestId = String(message.requestId || '');
+      const vssId = String(message.vssId || '');
+      const kind = String(message.kind || '');
       const videoId = String(message.videoId || '');
       const languageCode = String(message.languageCode || '');
+      const format = typeof message.format === 'string' ? message.format.trim() : '';
       const transferId = String(message.transferId || '');
       const totalChunks = Number(message.totalChunks || 0);
       const responseCharacters = Number(message.responseCharacters || 0);
+
+      // Validate requestId against active waiter
+      if (!requestId || !captionBodyWaiters.has(requestId)) {
+        console.warn('[HoverNotes Captions] Dropping chunked transfer start: no active waiter for requestId', { requestId, transferId });
+        return;
+      }
+      const waiter = captionBodyWaiters.get(requestId);
+      if (waiter.videoId && videoId && waiter.videoId !== videoId) {
+        console.warn('[HoverNotes Captions] Dropping chunked transfer start: videoId mismatch', { requestId, transferId });
+        return;
+      }
+      if (waiter.vssId && vssId && waiter.vssId !== vssId) {
+        console.warn('[HoverNotes Captions] Dropping chunked transfer start: vssId mismatch', { requestId, transferId });
+        return;
+      }
+      if (waiter.kind && kind && waiter.kind !== kind) {
+        console.warn('[HoverNotes Captions] Dropping chunked transfer start: kind mismatch', { requestId, transferId });
+        return;
+      }
+
       if (!videoId || !transferId || (currentVideoId && videoId !== currentVideoId)) return;
       if (!Number.isInteger(totalChunks) || totalChunks < 1 || totalChunks > 512 ||
           !Number.isFinite(responseCharacters) || responseCharacters < 1 || responseCharacters > MAX_CAPTION_BODY_CHARS) {
         deliverCaptionBody({
-          videoId, languageCode, status: 0, body: '', responseCharacters: 0,
+          requestId, vssId, kind,
+          videoId, languageCode, format, status: 0, body: '', responseCharacters: 0,
           readError: 'Invalid chunked caption transfer metadata.'
         });
         return;
       }
-      // Keep only the active transfer to bound memory if YouTube emits multiple formats.
-      for (const [oldId, oldTransfer] of captionBodyTransfers) {
-        clearTimeout(oldTransfer.timer);
-        captionBodyTransfers.delete(oldId);
+
+      // Bound concurrent active transfers without wiping other valid requests' transfers
+      const MAX_ACTIVE_TRANSFERS = 4;
+      if (captionBodyTransfers.size >= MAX_ACTIVE_TRANSFERS) {
+        for (const [id, t] of captionBodyTransfers) {
+          if (!captionBodyWaiters.has(t.requestId)) {
+            clearTimeout(t.timer);
+            captionBodyTransfers.delete(id);
+          }
+        }
+        if (captionBodyTransfers.size >= MAX_ACTIVE_TRANSFERS) {
+          console.warn('[HoverNotes Captions] Max concurrent caption transfers reached; rejecting transfer', { transferId, requestId });
+          deliverCaptionBody({
+            requestId, vssId, kind,
+            videoId, languageCode, format, status: 0, body: '', responseCharacters: 0,
+            readError: 'Too many concurrent chunked caption transfers.'
+          });
+          return;
+        }
       }
+
       const transfer = {
+        transferId,
+        requestId,
+        vssId,
+        kind,
         videoId,
         languageCode,
+        format,
         status: Number(message.status || 0),
         contentType: String(message.contentType || ''),
         transport: String(message.transport || 'unknown'),
@@ -245,7 +350,8 @@
         timer: setTimeout(() => {
           captionBodyTransfers.delete(transferId);
           deliverCaptionBody({
-            videoId, languageCode, status: transfer.status, contentType: transfer.contentType,
+            requestId: transfer.requestId, vssId: transfer.vssId, kind: transfer.kind,
+            videoId, languageCode, format: transfer.format, status: transfer.status, contentType: transfer.contentType,
             transport: transfer.transport, body: '', responseCharacters: transfer.receivedCharacters,
             readError: `Chunked caption transfer timed out (${transfer.received.size}/${totalChunks} chunks).`
           });
@@ -253,7 +359,7 @@
       };
       captionBodyTransfers.set(transferId, transfer);
       console.info('[HoverNotes Captions] Receiving chunked player caption response', {
-        videoId, languageCode, responseCharacters, totalChunks
+        requestId, vssId, kind, videoId, languageCode, format, responseCharacters, totalChunks
       });
       return;
     }
@@ -262,6 +368,14 @@
       const transferId = String(message.transferId || '');
       const transfer = captionBodyTransfers.get(transferId);
       if (!transfer || (currentVideoId && transfer.videoId !== currentVideoId)) return;
+
+      // Discard late chunks for expired/cancelled waiters
+      if (!captionBodyWaiters.has(transfer.requestId)) {
+        clearTimeout(transfer.timer);
+        captionBodyTransfers.delete(transferId);
+        return;
+      }
+
       const index = Number(message.index);
       const chunk = typeof message.chunk === 'string' ? message.chunk : '';
       if (!Number.isInteger(index) || index < 0 || index >= transfer.totalChunks ||
@@ -274,7 +388,8 @@
         clearTimeout(transfer.timer);
         captionBodyTransfers.delete(transferId);
         deliverCaptionBody({
-          videoId: transfer.videoId, languageCode: transfer.languageCode,
+          requestId: transfer.requestId, vssId: transfer.vssId, kind: transfer.kind,
+          videoId: transfer.videoId, languageCode: transfer.languageCode, format: transfer.format,
           status: transfer.status, contentType: transfer.contentType, transport: transfer.transport,
           body: '', responseCharacters: transfer.receivedCharacters,
           readError: 'Chunked caption transfer exceeded its declared response size.'
@@ -287,18 +402,21 @@
         const body = transfer.chunks.join('');
         if (body.length !== transfer.responseCharacters) {
           deliverCaptionBody({
-            videoId: transfer.videoId, languageCode: transfer.languageCode,
+            requestId: transfer.requestId, vssId: transfer.vssId, kind: transfer.kind,
+            videoId: transfer.videoId, languageCode: transfer.languageCode, format: transfer.format,
             status: transfer.status, contentType: transfer.contentType, transport: transfer.transport,
             body: '', responseCharacters: body.length,
             readError: `Chunked caption length mismatch (${body.length}/${transfer.responseCharacters}).`
           });
         } else {
           console.info('[HoverNotes Captions] Chunked player caption response reassembled', {
-            videoId: transfer.videoId, languageCode: transfer.languageCode,
+            requestId: transfer.requestId, vssId: transfer.vssId, kind: transfer.kind,
+            videoId: transfer.videoId, languageCode: transfer.languageCode, format: transfer.format,
             responseCharacters: body.length, totalChunks: transfer.totalChunks
           });
           deliverCaptionBody({
-            videoId: transfer.videoId, languageCode: transfer.languageCode,
+            requestId: transfer.requestId, vssId: transfer.vssId, kind: transfer.kind,
+            videoId: transfer.videoId, languageCode: transfer.languageCode, format: transfer.format,
             status: transfer.status, contentType: transfer.contentType, transport: transfer.transport,
             body, responseCharacters: body.length
           });
@@ -309,8 +427,12 @@
 
     if (message.type === 'CAPTION_BODY') {
       deliverCaptionBody({
+        requestId: String(message.requestId || ''),
+        vssId: String(message.vssId || ''),
+        kind: String(message.kind || ''),
         videoId: String(message.videoId || ''),
         languageCode: String(message.languageCode || ''),
+        format: typeof message.format === 'string' ? message.format.trim() : '',
         status: Number(message.status || 0),
         contentType: String(message.contentType || ''),
         body: typeof message.body === 'string' ? message.body : '',
@@ -335,36 +457,73 @@
     }
   }
 
-  function waitForPlayerCaptionBody(videoId, languageCode, timeoutMs = 20000) {
-    const key = `${videoId}::${languageCode || ''}`;
-    const previous = lastCaptionBodies.get(key);
-    if (previous && previous.body.trim()) return Promise.resolve(previous);
+  function cancelPlayerCaptionRequest(videoId, requestId) {
+    if (!requestId) return;
+    try {
+      window.postMessage({
+        source: '__HOVERNOTES_ISOLATED__',
+        type: 'CANCEL_CAPTION_REQUEST',
+        videoId: videoId || '',
+        requestId
+      }, window.location.origin);
+    } catch (_) {}
+  }
 
+  function waitForPlayerCaptionBody(videoId, track, requestId, timeoutMs = 32000) {
+    const vssId = track?.vssId || '';
+    const kind = track?.kind || '';
+    const languageCode = track?.languageCode || '';
     return new Promise(resolve => {
-      const waiters = captionBodyWaiters.get(key) || [];
       const waiter = {
+        requestId,
+        videoId,
+        vssId,
+        kind,
+        languageCode,
         resolve,
         timer: setTimeout(() => {
-          const current = captionBodyWaiters.get(key) || [];
-          captionBodyWaiters.set(key, current.filter(item => item !== waiter));
-          resolve(lastCaptionBodies.get(key) || {
-            status: 0, body: '', responseCharacters: 0,
-            timeout: true, contentType: '', transport: 'none'
+          if (captionBodyWaiters.get(requestId) === waiter) {
+            captionBodyWaiters.delete(requestId);
+          }
+          for (const [tId, transfer] of captionBodyTransfers) {
+            if (transfer.requestId === requestId) {
+              clearTimeout(transfer.timer);
+              captionBodyTransfers.delete(tId);
+            }
+          }
+          cancelPlayerCaptionRequest(videoId, requestId);
+          resolve({
+            requestId,
+            videoId,
+            vssId,
+            kind,
+            languageCode,
+            format: '',
+            status: 0,
+            body: '',
+            responseCharacters: 0,
+            timeout: true,
+            contentType: '',
+            transport: 'none'
           });
         }, timeoutMs)
       };
-      waiters.push(waiter);
-      captionBodyWaiters.set(key, waiters);
+      if (requestId) {
+        captionBodyWaiters.set(requestId, waiter);
+      }
     });
   }
 
-  function requestPlayerCaptionBody(videoId, track) {
+  function requestPlayerCaptionBody(videoId, track, requestId, forceReactivation = false) {
     window.postMessage({
       source: '__HOVERNOTES_ISOLATED__',
       type: 'REQUEST_CAPTION_BODY',
+      requestId: requestId || '',
       videoId,
       languageCode: track?.languageCode || '',
-      vssId: track?.vssId || ''
+      vssId: track?.vssId || '',
+      kind: track?.kind || '',
+      forceReactivation: Boolean(forceReactivation)
     }, window.location.origin);
   }
 
@@ -399,7 +558,7 @@
     return [];
   }
 
-  // Select the best track: English manual > English ASR > Hindi > first available
+  // Select the best track: English manual > English ASR > Hindi manual > Hindi ASR > first available
   function pickBestCaptionTrack(tracks) {
     if (!tracks || tracks.length === 0) return null;
 
@@ -411,14 +570,21 @@
     const enAsr = tracks.find(t => t.languageCode === 'en' || t.languageCode?.startsWith('en-'));
     if (enAsr) return enAsr;
 
-    // 3. Hindi track
-    const hiTrack = tracks.find(t => t.languageCode === 'hi' || t.languageCode?.startsWith('hi-'));
-    if (hiTrack) return hiTrack;
+    // 3. Hindi manual
+    const hiManual = tracks.find(t => (t.languageCode === 'hi' || t.languageCode?.startsWith('hi-')) && t.kind !== 'asr');
+    if (hiManual) return hiManual;
 
-    // 4. Fallback to first available
+    // 4. Hindi auto-generated (ASR)
+    const hiAsr = tracks.find(t => t.languageCode === 'hi' || t.languageCode?.startsWith('hi-'));
+    if (hiAsr) return hiAsr;
+
+    // 5. Fallback to first available
     return tracks[0];
   }
 
+  function generateCaptionRequestId() {
+    return `hn-req-${Date.now()}-${Math.random().toString(36).slice(2, 9)}`;
+  }
 
   // Delegate format parsing to the separately tested caption parser.
   function parseJson3TimedText(jsonObj) {
@@ -427,6 +593,12 @@
 
   function parseXmlTimedText(xmlStr) {
     return globalThis.HoverNotesCaptionParser?.parseXmlTimedText(xmlStr) || [];
+  }
+
+  function parseCaptionResponse(rawBody, options) {
+    return globalThis.HoverNotesCaptionParser?.parseCaptionResponse
+      ? globalThis.HoverNotesCaptionParser.parseCaptionResponse(rawBody, options)
+      : { cues: [], formatRecognized: null, adapterAttempted: [], diagnostics: null };
   }
 
   // Get captions from the actual YouTube player request. Current YouTube Web
@@ -438,23 +610,6 @@
     if (!videoId) {
       transcriptDiagnostics.set('unknown', 'The current YouTube video ID could not be detected.');
       return [];
-    }
-    if (transcriptCache.has(videoId)) {
-      const cachedItems = transcriptCache.get(videoId);
-      const cacheMetrics = {
-        cacheHit: true,
-        totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
-        trackDiscoveryMs: 0,
-        playerWaitMs: 0,
-        captionParseMs: 0,
-        cueCount: cachedItems.length
-      };
-      transcriptPerformanceCache.set(videoId, cacheMetrics);
-      console.info('[HoverNotes Performance] Caption transcript cache hit', {
-        videoId,
-        ...cacheMetrics
-      });
-      return cachedItems;
     }
 
     const trackDiscoveryStartedAt = performanceNow();
@@ -512,64 +667,138 @@
     }
     const trackDiscoveryMs = Math.round(performanceNow() - trackDiscoveryStartedAt);
 
-    // Register the waiter BEFORE asking the player to activate captions because
-    // the resulting fetch/XHR can complete quickly.
-    const bodyPromise = waitForPlayerCaptionBody(videoId, bestTrack.languageCode, 32000);
-    const playerWaitStartedAt = performanceNow();
-    requestPlayerCaptionBody(videoId, bestTrack);
-    const response = await bodyPromise;
-    const playerWaitMs = Math.round(performanceNow() - playerWaitStartedAt);
+    const trackKey = bestTrack.vssId || `${bestTrack.languageCode}::${bestTrack.kind || 'default'}`;
+    const transcriptCacheKey = `${videoId}::${trackKey}`;
 
-    if (!response.body?.trim()) {
-      const reason = response.timeout
-        ? 'The player did not issue a timed-text request for the selected caption track within 32 seconds.'
-        : response.bodyTooLarge
-          ? `The player caption response was too large (${response.responseCharacters} characters).`
-          : response.readError
-            ? `Could not read the player caption response: ${response.readError}`
-            : `The player caption request returned no body (HTTP ${response.status || 'unknown'}, ${response.contentType || 'unknown content type'}, ${response.responseCharacters || 0} characters).`;
-      const activation = captionActivationDiagnostics.get(videoId);
-      const activationDetail = activation && !activation.startsWith('Player activation requested') ? ` Player activation: ${activation}` : '';
-      const diagnostic = `Found ${tracks.length} caption track(s) (${bestTrack.languageCode}), but no caption text was captured. ${reason}${activationDetail}`;
-      transcriptDiagnostics.set(videoId, diagnostic);
-      const metrics = {
-        cacheHit: false,
-        trackDiscoveryMs,
-        playerWaitMs,
-        captionParseMs: 0,
+    if (transcriptCache.has(transcriptCacheKey)) {
+      const cachedItems = transcriptCache.get(transcriptCacheKey);
+      const cacheMetrics = {
+        cacheHit: true,
+        trackKey,
         totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
-        responseCharacters: response.responseCharacters || 0,
-        outcome: 'empty-player-response'
+        trackDiscoveryMs,
+        playerWaitMs: 0,
+        captionParseMs: 0,
+        cueCount: cachedItems.length
       };
-      transcriptPerformanceCache.set(videoId, metrics);
-      console.info('[HoverNotes Performance] Caption transcript load finished', { videoId, ...metrics });
-      console.error('[HoverNotes Captions] Player caption response was empty or unavailable', {
+      transcriptPerformanceCache.set(videoId, cacheMetrics);
+      console.info('[HoverNotes Performance] Caption transcript cache hit', {
         videoId,
-        languageCode: bestTrack.languageCode,
-        status: response.status,
-        contentType: response.contentType,
-        responseCharacters: response.responseCharacters,
-        timeout: Boolean(response.timeout),
-        transport: response.transport
+        trackKey,
+        ...cacheMetrics
       });
-      return [];
+      return cachedItems;
     }
 
+    // Attempt 1: Request fresh player response with correlated requestId
+    let attempt = 1;
+    let requestId = generateCaptionRequestId();
+    let bodyPromise = waitForPlayerCaptionBody(videoId, bestTrack, requestId, 32000);
+    const playerWaitStartedAt = performanceNow();
+    requestPlayerCaptionBody(videoId, bestTrack, requestId, false);
+    let response = await bodyPromise;
+    let playerWaitMs = Math.round(performanceNow() - playerWaitStartedAt);
+
+    let captionParseStartedAt = performanceNow();
+    let parseResult = { cues: [], formatRecognized: null, adapterAttempted: [], diagnostics: null };
     let parsedItems = [];
-    const body = response.body;
-    const captionParseStartedAt = performanceNow();
-    try {
-      parsedItems = parseJson3TimedText(JSON.parse(body));
-    } catch (_) {
-      parsedItems = parseXmlTimedText(body);
-    }
-    if (parsedItems.length === 0) {
-      // Some player builds return JSON3 even when the content type is HTML-ish.
-      try { parsedItems = parseJson3TimedText(JSON.parse(body)); } catch (_) {}
+
+    if (response.body?.trim()) {
+      parseResult = parseCaptionResponse(response.body, {
+        format: typeof response.format === 'string' ? response.format : '',
+        contentType: response.contentType || '',
+        responseCharacters: response.body.length
+      });
+      parsedItems = parseResult.cues || [];
     }
 
+    // Bounded fresh recovery: Exactly ONE controlled retry on 0-cue failure (unless timed out)
+    if (parsedItems.length === 0 && !response.timeout) {
+      attempt = 2;
+      const retryRequestId = generateCaptionRequestId();
+      console.warn('[HoverNotes Captions] Attempt 1 produced zero cues; performing fresh retry with forced track reactivation', {
+        videoId,
+        trackKey,
+        attempt1RequestId: requestId,
+        attempt2RequestId: retryRequestId,
+        attempt1Characters: response.responseCharacters || 0
+      });
+
+      const retryWaitStartedAt = performanceNow();
+      const retryBodyPromise = waitForPlayerCaptionBody(videoId, bestTrack, retryRequestId, 32000);
+      requestPlayerCaptionBody(videoId, bestTrack, retryRequestId, true);
+      const retryResponse = await retryBodyPromise;
+      playerWaitMs += Math.round(performanceNow() - retryWaitStartedAt);
+
+      if (retryResponse.body?.trim()) {
+        response = retryResponse;
+        requestId = retryRequestId;
+        captionParseStartedAt = performanceNow();
+        parseResult = parseCaptionResponse(response.body, {
+          format: typeof response.format === 'string' ? response.format : '',
+          contentType: response.contentType || '',
+          responseCharacters: response.body.length
+        });
+        parsedItems = parseResult.cues || [];
+      } else {
+        response = retryResponse;
+        requestId = retryRequestId;
+      }
+    }
+
+    // Zero-cue failure handling (no cues parsed from either attempt)
     if (parsedItems.length === 0) {
-      const diagnostic = `Captured ${body.length} characters from the YouTube player (${bestTrack.languageCode}), but the response contained no supported caption cues.`;
+      if (!response.body?.trim()) {
+        const reason = response.timeout
+          ? 'The player did not issue a timed-text request for the selected caption track within 32 seconds.'
+          : response.bodyTooLarge
+            ? `The player caption response was too large (${response.responseCharacters} characters).`
+            : response.readError
+              ? `Could not read the player caption response: ${response.readError}`
+              : `The player caption request returned no body (HTTP ${response.status || 'unknown'}, ${response.contentType || 'unknown content type'}, ${response.responseCharacters || 0} characters).`;
+        const activation = captionActivationDiagnostics.get(videoId);
+        const activationDetail = activation && !activation.startsWith('Player activation requested') ? ` Player activation: ${activation}` : '';
+        const diagnostic = `Found ${tracks.length} caption track(s) (${bestTrack.languageCode}), but no caption text was captured. ${reason}${activationDetail}`;
+        transcriptDiagnostics.set(videoId, diagnostic);
+        const metrics = {
+          cacheHit: false,
+          trackDiscoveryMs,
+          playerWaitMs,
+          captionParseMs: 0,
+          totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
+          responseCharacters: response.responseCharacters || 0,
+          attempts: attempt,
+          outcome: 'empty-player-response'
+        };
+        transcriptPerformanceCache.set(videoId, metrics);
+        console.info('[HoverNotes Performance] Caption transcript load finished', { videoId, ...metrics });
+        console.error('[HoverNotes Captions] Player caption response was empty or unavailable', {
+          videoId,
+          trackKey,
+          languageCode: bestTrack.languageCode,
+          status: response.status,
+          contentType: response.contentType,
+          responseCharacters: response.responseCharacters,
+          timeout: Boolean(response.timeout),
+          transport: response.transport,
+          attempts: attempt
+        });
+        return [];
+      }
+
+      const body = response.body;
+      const format = typeof response.format === 'string' ? response.format : '';
+      const contentType = response.contentType || '';
+      let diagnostic = '';
+      if (parseResult.diagnostics && globalThis.HoverNotesCaptionParser?.formatUnsupportedJsonDiagnostic) {
+        diagnostic = globalThis.HoverNotesCaptionParser.formatUnsupportedJsonDiagnostic(
+          parseResult.diagnostics,
+          body.length
+        );
+      } else {
+        const fmtDesc = format ? `fmt=${format}` : 'fmt absent';
+        diagnostic = `Captured ${body.length} characters from the YouTube player (${bestTrack.languageCode}, ${fmtDesc}), but the response contained no supported caption cues.`;
+      }
       transcriptDiagnostics.set(videoId, diagnostic);
       const metrics = {
         cacheHit: false,
@@ -578,29 +807,54 @@
         captionParseMs: Math.round(performanceNow() - captionParseStartedAt),
         totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
         responseCharacters: body.length,
+        attempts: attempt,
         outcome: 'zero-parsed-cues'
       };
       transcriptPerformanceCache.set(videoId, metrics);
       console.info('[HoverNotes Performance] Caption transcript load finished', { videoId, ...metrics });
-      console.error('[HoverNotes Captions] Player response captured but parsed to zero cues', {
-        videoId, languageCode: bestTrack.languageCode, responseCharacters: body.length,
-        contentType: response.contentType, transport: response.transport
-      });
+
+      if (parseResult.diagnostics) {
+        console.error('[HoverNotes Captions] Unsupported YouTube caption JSON schema', {
+          videoId,
+          trackKey,
+          languageCode: bestTrack.languageCode,
+          responseCharacters: body.length,
+          contentType,
+          format: format || 'absent',
+          transport: response.transport,
+          safeDiagnostics: parseResult.diagnostics,
+          attempts: attempt
+        });
+      } else {
+        console.error('[HoverNotes Captions] Player response captured but parsed to zero cues', {
+          videoId,
+          trackKey,
+          languageCode: bestTrack.languageCode,
+          responseCharacters: body.length,
+          contentType,
+          format: format || 'absent',
+          transport: response.transport,
+          adaptersAttempted: parseResult.adapterAttempted,
+          attempts: attempt
+        });
+      }
       return [];
     }
 
     parsedItems.sort((a, b) => a.start - b.start);
-    transcriptCache.set(videoId, parsedItems);
+    transcriptCache.set(transcriptCacheKey, parsedItems);
     const metrics = {
       cacheHit: false,
       trackCount: tracks.length,
+      trackKey,
       languageCode: bestTrack.languageCode,
       trackDiscoveryMs,
       playerWaitMs,
       captionParseMs: Math.round(performanceNow() - captionParseStartedAt),
       totalLoadMs: Math.round(performanceNow() - retrievalStartedAt),
-      responseCharacters: body.length,
+      responseCharacters: response.body?.length || 0,
       cueCount: parsedItems.length,
+      attempts: attempt,
       outcome: 'success'
     };
     transcriptPerformanceCache.set(videoId, metrics);
@@ -609,11 +863,13 @@
       `Loaded ${parsedItems.length} caption cues from the YouTube player (${bestTrack.languageCode}).`);
     console.info('[HoverNotes Captions] Player caption retrieval succeeded', {
       videoId,
+      trackKey,
       languageCode: bestTrack.languageCode,
       cueCount: parsedItems.length,
-      responseCharacters: body.length,
+      responseCharacters: response.body?.length || 0,
       firstCueTime: parsedItems[0]?.start ?? null,
-      lastCueTime: parsedItems[parsedItems.length - 1]?.start ?? null
+      lastCueTime: parsedItems[parsedItems.length - 1]?.start ?? null,
+      attempts: attempt
     });
     return parsedItems;
   }
@@ -1265,6 +1521,18 @@
     const newVideoId = extractVideoId();
     if (newVideoId && newVideoId !== currentVideoId) {
       currentVideoId = newVideoId;
+
+      // Cancel all active caption requests and transfers on video transition
+      for (const [reqId, waiter] of captionBodyWaiters) {
+        clearTimeout(waiter.timer);
+        cancelPlayerCaptionRequest(waiter.videoId, reqId);
+      }
+      captionBodyWaiters.clear();
+      for (const [tId, transfer] of captionBodyTransfers) {
+        clearTimeout(transfer.timer);
+      }
+      captionBodyTransfers.clear();
+
       studyFrameCandidates.clear();
       if (studyFrameSamplerTimer) clearInterval(studyFrameSamplerTimer);
       studyFrameSamplerTimer = null;
@@ -1301,4 +1569,11 @@
     requestMainWorldCaptionTracks(currentVideoId);
   }
   injectPlayerControlsButton();
+
+  if (typeof window !== 'undefined' && window.__HOVERNOTES_CONTENT_TEST_HOOKS__) {
+    window.__HOVERNOTES_CONTENT_TEST_HOOKS__.captionBodyWaiters = captionBodyWaiters;
+    window.__HOVERNOTES_CONTENT_TEST_HOOKS__.captionBodyTransfers = captionBodyTransfers;
+    window.__HOVERNOTES_CONTENT_TEST_HOOKS__.waitForPlayerCaptionBody = waitForPlayerCaptionBody;
+    window.__HOVERNOTES_CONTENT_TEST_HOOKS__.pickBestCaptionTrack = pickBestCaptionTrack;
+  }
 })();
