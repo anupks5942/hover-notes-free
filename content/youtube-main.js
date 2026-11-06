@@ -274,6 +274,20 @@
     }
 
     Promise.resolve(bodyPromise).then(body => {
+      const text = typeof body === 'string' ? body : '';
+      const status = Number(responseMeta?.status || 0);
+
+      // Do not consume request context on aborted network requests (HTTP 0 with empty body).
+      // YouTube's player frequently aborts intermediate requests during track switching/settling.
+      if (status === 0 && !text.trim()) {
+        log('Aborted or empty timed-text stream ignored (waiting for completed response)', {
+          requestId: reqCtx?.requestId || 'none',
+          status,
+          transport: responseMeta?.transport
+        });
+        return;
+      }
+
       // Check again after body promise resolves: request may have been cancelled during network read!
       if (reqCtx && reqCtx.requestId) {
         if (!activeCaptionRequests.has(reqCtx.requestId)) {
@@ -285,7 +299,6 @@
         activeCaptionRequests.delete(reqCtx.requestId);
       }
 
-      const text = typeof body === 'string' ? body : '';
       const payload = {
         requestId: reqCtx?.requestId || '',
         vssId: meta.vssId || reqCtx?.vssId || '',
@@ -322,6 +335,15 @@
 
       sendCaptionBody(payload);
     }).catch(error => {
+      const isAbort = error?.name === 'AbortError' || String(error?.message || '').toLowerCase().includes('aborted');
+      if (isAbort) {
+        log('Aborted timed-text fetch ignored (waiting for completed response)', {
+          requestId: reqCtx?.requestId || 'none',
+          error: String(error?.message || error)
+        });
+        return;
+      }
+
       if (reqCtx?.requestId) {
         if (!activeCaptionRequests.has(reqCtx.requestId)) {
           return;
@@ -516,9 +538,36 @@
         return;
       }
 
+      // Check if captions module is loaded; if not, request module and allow short delay
+      let moduleReady = true;
+      try {
+        if (typeof player.getOptions === 'function' && !player.getOptions().includes('captions')) {
+          moduleReady = false;
+        } else if (typeof player.getOption === 'function' && player.getOption('captions', 'tracklist') === null) {
+          moduleReady = false;
+        }
+      } catch (_) {}
+
+      if (!moduleReady && Date.now() < deadline) {
+        try { player.loadModule?.('captions'); } catch (_) {}
+        setTimeout(attempt, 200);
+        return;
+      }
+
       try {
         try { player.loadModule?.('captions'); } catch (_) {}
-        if (forceReactivation) {
+
+        const currentActiveTrack = (typeof player.getOption === 'function')
+          ? player.getOption('captions', 'track')
+          : null;
+        const isTrackAlreadyActive = Boolean(
+          currentActiveTrack && (
+            (match.vssId && currentActiveTrack.vssId === match.vssId) ||
+            (match.languageCode && currentActiveTrack.languageCode === match.languageCode)
+          )
+        );
+
+        if (forceReactivation || isTrackAlreadyActive) {
           // Safe player-supported reactivation sequence: clear track, then set desired track to trigger player request
           try { player.setOption('captions', 'track', {}); } catch (_) {}
           setTimeout(() => {
@@ -545,7 +594,7 @@
           vssId: match.vssId || vssId || '',
           kind: match.kind || kind || '',
           trackCount: trackList.length,
-          forceReactivation
+          forceReactivation: forceReactivation || isTrackAlreadyActive
         });
       } catch (error) {
         send('CAPTION_ACTIVATION', {

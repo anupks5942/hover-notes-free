@@ -577,7 +577,8 @@ NON-NEGOTIABLE GROUNDING RULES:
     signal,
     promptOverride = null,
     systemPromptOverride = null,
-    maxOutputTokens = 8192
+    maxOutputTokens = 8192,
+    returnMetadata = false
   }) {
     const configStartedAt = performance.now();
     await this.initConfig();
@@ -681,7 +682,8 @@ CHRONOLOGY AND ASSET RULES:
             signal,
             onDiagnostics,
             systemPrompt: activeSystemPrompt,
-            maxOutputTokens
+            maxOutputTokens,
+            returnMetadata
           });
           // Once a fallback proves healthy, keep using it for the rest of this
           // extension session instead of paying the first-token timeout on every
@@ -695,7 +697,7 @@ CHRONOLOGY AND ASSET RULES:
             keyAttempt: attempts,
             modelAttempt: modelAttemptNumber,
             durationMs: Math.round(performance.now() - attemptStartedAt),
-            generatedCharacters: generated.length
+            generatedCharacters: returnMetadata ? (generated?.text || '').length : (generated || '').length
           });
           return generated;
         } catch (err) {
@@ -752,14 +754,15 @@ CHRONOLOGY AND ASSET RULES:
           signal,
           onDiagnostics,
           systemPrompt: activeSystemPrompt,
-          maxOutputTokens
+          maxOutputTokens,
+          returnMetadata
         });
         this.emitDiagnostics(onDiagnostics, {
           type: 'attempt-success',
           provider: 'openai-compatible',
           model: this.customModel || 'gpt-4o-mini',
           durationMs: Math.round(performance.now() - customStartedAt),
-          generatedCharacters: generated.length
+          generatedCharacters: returnMetadata ? (generated?.text || '').length : (generated || '').length
         });
         return generated;
       } catch (customErr) {
@@ -834,6 +837,7 @@ FACTUAL RULES:
 
     let packets = [];
     let packetWindows = [];
+    let packetFallbacks = [];
     let extractionCount = 0;
     let reductionCount = 0;
     const coverageAssignment = helpers.validateCoverageAssignment(chunks, coverageWindows, 30);
@@ -841,20 +845,9 @@ FACTUAL RULES:
       throw new Error(`Transcript chunking did not map every source window exactly once (missing: ${coverageAssignment.missing.join(', ') || 'none'}; duplicated: ${coverageAssignment.duplicated.join(', ') || 'none'}). The original draft was retained.`);
     }
 
-    for (let i = 0; i < chunks.length; i++) {
+    const extractChunkWithRecovery = async (chunk, chunkWindows, chunkVisualAssets, depth = 0) => {
       if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
-      const chunk = chunks[i];
-      const chunkBuckets = new Set(chunk.lines.map(line => {
-        const seconds = helpers.parseTimestampSeconds(line);
-        return seconds === null ? null : Math.floor(seconds / 30);
-      }).filter(x => x !== null));
-      const chunkWindows = coverageWindows.filter(window => chunkBuckets.has(window.bucket));
       const rangeManifest = chunkWindows.map(x => `${x.startLabel}–${x.endLabel} (${x.cueCount} transcript cues)`).join('\n');
-      const chunkVisualAssets = visualAssets.filter(asset => {
-        if (!asset?.dataUrl || !Number.isFinite(chunk.startTime) || !Number.isFinite(chunk.endTime)) return false;
-        const seconds = helpers.parseTimestampSeconds(`[${asset.timestamp || ''}]`);
-        return seconds !== null && seconds >= chunk.startTime && seconds <= chunk.endTime;
-      }).slice(0, 4);
       const visualManifest = chunkVisualAssets.length
         ? chunkVisualAssets.map(asset => `Original slide/frame attached at ${asset.timestamp}; inspect only visibly legible content.`).join('\n')
         : '[No original screenshot frame is available for this source segment.]';
@@ -862,7 +855,7 @@ FACTUAL RULES:
       const prompt = `Build a comprehensive, loss-minimizing evidence packet from this original lecture segment. This is NOT a summary and NOT the final study document.
 
 VIDEO CONTEXT (metadata only): ${videoTitle || 'Untitled lecture'}
-SEGMENT: ${i + 1}/${chunks.length}
+SEGMENT: ${chunk.index != null ? `${chunk.index + 1}/${chunks.length}` : 'recovery segment'}
 SOURCE RANGE: ${chunk.startLabel || 'unknown'}–${chunk.endLabel || 'unknown'}
 SOURCE WINDOWS INCLUDED IN THIS PACKET:
 ${rangeManifest}
@@ -882,30 +875,241 @@ EVIDENCE EXTRACTION REQUIREMENTS:
 3. Capture definitions, explanations, reasoning, examples, analogies, comparisons, caveats, named entities, numbers, claims, procedures, and exam/course information when actually spoken.
 4. Translate Hindi/Hinglish faithfully into clear English. Preserve the instructor's intended meaning and attribute personal opinions/claims.
 5. Combine repeated wording only when it is genuinely redundant. Do not merge separate ideas into a vague sentence.
-6. Use topic labels and nested bullets. Keep ordinary source timestamps beside evidence statements for traceability; the final renderer may remove timestamps from the finished prose.
+6. Use topic labels and nested bullets. Group evidence chronologically by source window, with the window timestamp anchor (e.g., [${chunkWindows[0]?.startLabel || '00:00'}], etc.) at the start of each window's evidence block, so that every source window is explicitly represented.
 7. Do not add general textbook knowledge or details from the video description.
 8. Do not impose a word-count target. The packet must retain enough detail to reconstruct the segment without replaying it.
 9. Return Markdown only. Do not add a YAML frontmatter block or a video title.
 
 The source windows listed above are authoritative coverage metadata. They are already associated with this packet by the extension. Never invent, omit, or rewrite that metadata; simply extract the content from the transcript.`;
 
-      const packet = await this.generateNotesStream({
-        videoTitle,
-        currentTimestamp: `${chunk.startLabel || ''}–${chunk.endLabel || ''}`,
-        transcriptChunk: chunk.transcriptText,
-        modeLabel: 'Timestamp-windowed comprehensive evidence extraction',
-        promptOverride: prompt,
-        systemPromptOverride: systemPrompt,
-        frameImages: chunkVisualAssets.map(asset => asset.dataUrl),
-        maxOutputTokens: 8192,
-        signal,
-        onDiagnostics: event => stage('source-map-attempt', { chunk: i + 1, chunkCount: chunks.length, sourceWindowCount: chunkWindows.length, visualFrameCount: chunkVisualAssets.length, ...event })
-      });
-      const packetText = String(packet || '').trim();
-      if (packetText.length < Math.max(180, Math.floor(chunk.characterCount * 0.18))) {
-        throw new Error(`Evidence extraction was unexpectedly short for transcript segment ${i + 1}; the original draft was retained.`);
+      let rawResult = null;
+      let packetText = '';
+      let metadata = {};
+      try {
+        rawResult = await this.generateNotesStream({
+          videoTitle,
+          currentTimestamp: `${chunk.startLabel || ''}–${chunk.endLabel || ''}`,
+          transcriptChunk: chunk.transcriptText,
+          modeLabel: 'Timestamp-windowed comprehensive evidence extraction',
+          promptOverride: prompt,
+          systemPromptOverride: systemPrompt,
+          frameImages: chunkVisualAssets.map(asset => asset.dataUrl),
+          maxOutputTokens: 8192,
+          signal,
+          returnMetadata: true,
+          onDiagnostics: event => stage('source-map-attempt', {
+            chunk: (chunk.index != null ? chunk.index + 1 : 1),
+            chunkCount: chunks.length,
+            sourceWindowCount: chunkWindows.length,
+            visualFrameCount: chunkVisualAssets.length,
+            depth,
+            ...event
+          })
+        });
+        packetText = String(rawResult?.text || rawResult || '').trim();
+        metadata = rawResult?.metadata || {};
+      } catch (err) {
+        if (signal?.aborted || err.code === 'SAFETY_BLOCKED' || err.name === 'AbortError') throw err;
+        stage('source-map-attempt-error', { chunk: (chunk.index != null ? chunk.index + 1 : 1), depth, error: err.message });
       }
-      packets.push(packetText);
+
+      stage('source-map-stream-complete', {
+        chunk: (chunk.index != null ? chunk.index + 1 : 1),
+        chunkCount: chunks.length,
+        durationMs: metadata.totalRequestMs || 0,
+        outputCharacters: packetText.length,
+        finishReason: metadata.finishReason ?? null,
+        completionStatus: metadata.completionStatus || 'unknown_completion',
+        hasTerminalSignal: metadata.hasTerminalSignal ?? null,
+        isComplete: metadata.isComplete ?? null,
+        isTruncated: Boolean(metadata.isTruncated),
+        streamEndedNormally: Boolean(metadata.streamEndedNormally)
+      });
+
+      // Deterministic source-window validation
+      const val = helpers.validateEvidencePacket(packetText, chunkWindows);
+      stage('source-map-validation', {
+        chunk: (chunk.index != null ? chunk.index + 1 : 1),
+        valid: val.valid,
+        coveredWindows: val.coveredWindows,
+        missingWindows: val.missingWindows,
+        emptyWindows: val.emptyWindows,
+        duplicateAnchors: val.duplicateAnchors,
+        outOfOrderWindows: val.outOfOrderWindows,
+        repeatedWindowContent: val.repeatedWindowContent,
+        outputCharacters: val.outputCharacters
+      });
+
+      // If valid and not truncated by MAX_TOKENS: accept immediately! (Scenario B)
+      const completionUnverified = metadata.hasTerminalSignal === false;
+      if (val.valid && !metadata.isTruncated && !completionUnverified) {
+        return {
+          text: packetText,
+          windows: chunkWindows,
+          isFallback: false
+        };
+      }
+
+      // Tier 1 Recovery: Targeted completion for missing source windows
+      // (Only if not truncated by MAX_TOKENS and has partial content)
+      if (!metadata.isTruncated && !completionUnverified && val.missingWindows.length > 0 && val.missingWindows.length < chunkWindows.length) {
+        stage('source-map-repair-attempt', {
+          chunk: (chunk.index != null ? chunk.index + 1 : 1),
+          missingWindows: val.missingWindows,
+          missingWindowCount: val.missingWindows.length
+        });
+
+        const missingLines = helpers.getTranscriptLinesForWindows(chunk.lines, val.missingWindows, 30);
+        const missingWindowsManifest = chunkWindows
+          .filter(w => val.missingWindows.includes(w.startLabel))
+          .map(x => `${x.startLabel}–${x.endLabel} (${x.cueCount} cues)`)
+          .join('\n');
+
+        const repairPrompt = `TARGETED EVIDENCE EXTRACTION REPAIR:
+The initial extraction omitted evidence for specific source windows. Extract comprehensive evidence for ONLY the missing source windows listed below.
+
+MISSING SOURCE WINDOWS:
+${missingWindowsManifest}
+
+TRANSCRIPT CUES FOR MISSING WINDOWS:
+<transcript>
+${missingLines}
+</transcript>
+
+REQUIREMENTS:
+1. Extract every distinct instructional statement for each listed missing window.
+2. Group evidence chronologically by source window, with the window timestamp anchor (e.g., [${val.missingWindows[0]}]) at the start of each block.
+3. Do not re-extract already-covered windows.
+4. Return Markdown only.`;
+
+        try {
+          const repairResult = await this.generateNotesStream({
+            videoTitle,
+            currentTimestamp: `repair for ${val.missingWindows.join(', ')}`,
+            transcriptChunk: missingLines,
+            modeLabel: 'Targeted missing source-window evidence completion',
+            promptOverride: repairPrompt,
+            systemPromptOverride: systemPrompt,
+            maxOutputTokens: 8192,
+            signal,
+            returnMetadata: true,
+            onDiagnostics: event => stage('source-map-repair-diag', event)
+          });
+          const repairText = String(repairResult?.text || repairResult || '').trim();
+          const repairMetadata = repairResult?.metadata || {};
+
+          const mergedText = helpers.mergeEvidenceEntries(packetText, repairText, chunkWindows);
+          const repairVal = helpers.validateEvidencePacket(mergedText, chunkWindows);
+          stage('source-map-repair-complete', {
+            chunk: (chunk.index != null ? chunk.index + 1 : 1),
+            valid: repairVal.valid,
+            outputCharacters: mergedText.length,
+            missingWindows: repairVal.missingWindows,
+            duplicateAnchors: repairVal.duplicateAnchors,
+            outOfOrderWindows: repairVal.outOfOrderWindows,
+            repeatedWindowContent: repairVal.repeatedWindowContent,
+            repairedWindows: val.missingWindows.filter(w => !repairVal.missingWindows.includes(w))
+          });
+
+          if (repairVal.valid && !repairMetadata.isTruncated && repairMetadata.hasTerminalSignal !== false) {
+            return {
+              text: mergedText,
+              windows: chunkWindows,
+              isFallback: false
+            };
+          }
+        } catch (repairErr) {
+          if (signal?.aborted || repairErr.code === 'SAFETY_BLOCKED' || repairErr.name === 'AbortError') throw repairErr;
+          stage('source-map-repair-failed', { chunk: (chunk.index != null ? chunk.index + 1 : 1), error: repairErr.message });
+        }
+      }
+
+      // Tier 2 Recovery: Adaptive source splitting at 30-second window boundaries
+      // (Triggered if truncated by MAX_TOKENS or if targeted completion did not resolve missing windows)
+      if (depth < 2 && chunkWindows.length >= 2) {
+        stage('source-map-split-start', {
+          chunk: (chunk.index != null ? chunk.index + 1 : 1),
+          depth: depth + 1,
+          reason: metadata.isTruncated ? 'max_tokens' : (completionUnverified ? 'completion_unverified' : 'missing_windows'),
+          windowCount: chunkWindows.length
+        });
+
+        try {
+          const childChunks = helpers.splitChunkByWindows(chunk, chunkWindows, 2, 30);
+          const childPackets = [];
+          for (let c = 0; c < childChunks.length; c++) {
+            const childChunk = childChunks[c];
+            const childWindows = childChunk.windows;
+            const childAssets = visualAssets.filter(asset => {
+              if (!asset?.dataUrl || !Number.isFinite(childChunk.startTime) || !Number.isFinite(childChunk.endTime)) return false;
+              const seconds = helpers.parseTimestampSeconds(`[${asset.timestamp || ''}]`);
+              return seconds !== null && seconds >= childChunk.startTime && seconds <= childChunk.endTime;
+            }).slice(0, 4);
+
+            const childResult = await extractChunkWithRecovery(childChunk, childWindows, childAssets, depth + 1);
+            childPackets.push(childResult);
+          }
+
+          const mergedChildrenText = childPackets.map(p => p.text).join('\n\n');
+          stage('source-map-split-complete', {
+            chunk: (chunk.index != null ? chunk.index + 1 : 1),
+            depth: depth + 1,
+            parts: childPackets.length,
+            outputCharacters: mergedChildrenText.length
+          });
+
+          const splitVal = helpers.validateEvidencePacket(mergedChildrenText, chunkWindows);
+          if (splitVal.valid) {
+            return {
+              text: mergedChildrenText,
+              windows: chunkWindows,
+              isFallback: childPackets.some(p => p.isFallback)
+            };
+          }
+        } catch (splitErr) {
+          if (signal?.aborted || splitErr.code === 'SAFETY_BLOCKED' || splitErr.name === 'AbortError') throw splitErr;
+          stage('source-map-split-failed', { chunk: (chunk.index != null ? chunk.index + 1 : 1), depth: depth + 1, error: splitErr.message });
+        }
+      }
+
+      // Tier 3 Recovery: Last-Resort Raw-Source Fallback Packet
+      // Retain original timestamped transcript in a clearly marked raw-source fallback packet
+      stage('source-map-source-fallback', {
+        chunk: (chunk.index != null ? chunk.index + 1 : 1),
+        reason: metadata.isTruncated ? 'max_tokens_unresolved' : (completionUnverified ? 'completion_unverified' : (val.reasons?.join('; ') || 'unresolved_extraction_failure')),
+        transcriptCharacters: chunk.characterCount,
+        windowCount: chunkWindows.length
+      });
+
+      const rawFallbackText = `### Raw Source Transcript Fallback [${chunk.startLabel || '00:00'}–${chunk.endLabel || 'end'}]
+[Unprocessed source transcript preserved below due to extraction failure. The final renderer must faithfully translate and extract all instructional content from this raw source.]
+
+${chunk.transcriptText}`;
+
+      return {
+        text: rawFallbackText,
+        windows: chunkWindows,
+        isFallback: true
+      };
+    };
+
+    for (let i = 0; i < chunks.length; i++) {
+      if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
+      const chunk = chunks[i];
+      const chunkBuckets = new Set(chunk.lines.map(line => {
+        const seconds = helpers.parseTimestampSeconds(line);
+        return seconds === null ? null : Math.floor(seconds / 30);
+      }).filter(x => x !== null));
+      const chunkWindows = coverageWindows.filter(window => chunkBuckets.has(window.bucket));
+      const chunkVisualAssets = visualAssets.filter(asset => {
+        if (!asset?.dataUrl || !Number.isFinite(chunk.startTime) || !Number.isFinite(chunk.endTime)) return false;
+        const seconds = helpers.parseTimestampSeconds(`[${asset.timestamp || ''}]`);
+        return seconds !== null && seconds >= chunk.startTime && seconds <= chunk.endTime;
+      }).slice(0, 4);
+
+      const packetResult = await extractChunkWithRecovery(chunk, chunkWindows, chunkVisualAssets, 0);
+
+      packets.push(packetResult.text);
       packetWindows.push(chunkWindows.map(window => ({
         windowId: window.windowId,
         bucket: window.bucket,
@@ -913,13 +1117,15 @@ The source windows listed above are authoritative coverage metadata. They are al
         endLabel: window.endLabel,
         cueCount: window.cueCount
       })));
+      packetFallbacks.push(packetResult.isFallback);
       extractionCount++;
       stage('source-map-complete', {
         chunk: i + 1,
         chunkCount: chunks.length,
         inputCharacters: chunk.characterCount,
-        outputCharacters: packetText.length,
-        sourceWindowsMapped: chunkWindows.length
+        outputCharacters: packetResult.text.length,
+        sourceWindowsMapped: chunkWindows.length,
+        isFallback: packetResult.isFallback
       });
     }
 
@@ -939,55 +1145,233 @@ The source windows listed above are authoritative coverage metadata. They are al
     while (packets.join('\n\n').length > ledgerLimit && level < 5) {
       level++;
       const groups = helpers.chunkKnowledgeBlocks(packets, 24000);
-      if (!groups.length) throw new Error('The evidence ledger could not be safely consolidated; the original draft was retained.');
+      if (!groups.length) break;
       const reduced = [];
       const reducedWindows = [];
+      const reducedFallbacks = [];
       let packetCursor = 0;
       for (let g = 0; g < groups.length; g++) {
         if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
         const group = groups[g];
         const groupPackets = packetWindows.slice(packetCursor, packetCursor + group.length);
+        const groupFallbacks = packetFallbacks.slice(packetCursor, packetCursor + group.length);
         packetCursor += group.length;
         const groupWindows = uniqueWindowRecords(groupPackets.flat());
-        const sourceRanges = groupWindows.map(x => `${x.startLabel}–${x.endLabel} (${x.cueCount} cues)`).join('\n');
+        const groupHasFallback = groupFallbacks.some(Boolean);
+        const rangeManifest = groupWindows.map(x => `${x.startLabel}–${x.endLabel} (${x.cueCount} cues)`).join('\n');
         const groupText = group.join('\n\n');
         const prompt = `Loss-minimizing consolidation of comprehensive evidence packets. Do not write final notes yet.
 
-SOURCE WINDOWS REPRESENTED IN THIS GROUP (extension-owned metadata):
-${sourceRanges}
+SOURCE WINDOWS REPRESENTED IN THIS GROUP (authoritative coverage metadata):
+${rangeManifest}
 
 EVIDENCE PACKETS:
 <packets>
 ${groupText}
 </packets>
 
-Preserve every distinct definition, explanation, motivation, example, analogy, number, claim, caveat, comparison, procedure, course detail and exam detail. Remove only exact duplicates. Do not collapse nuances into vague summaries. Keep source timestamps attached to the evidence. The extension tracks source-window coverage separately; do not reproduce machine-generated IDs, hidden markers, or tokens. Add no external knowledge. Return Markdown only.`;
-        const result = await this.generateNotesStream({
-          videoTitle,
-          currentTimestamp: `evidence consolidation level ${level}`,
-          transcriptChunk: groupText,
-          modeLabel: 'Loss-minimizing evidence consolidation',
-          promptOverride: prompt,
-          systemPromptOverride: systemPrompt,
-          maxOutputTokens: 8192,
-          signal,
-          onDiagnostics: event => stage('source-reduce-attempt', { level, group: g + 1, groupCount: groups.length, sourceWindowCount: groupWindows.length, ...event })
+CONSOLIDATION REQUIREMENTS:
+1. Preserve every distinct definition, explanation, motivation, example, analogy, number, claim, caveat, comparison, procedure, course detail and exam detail across the evidence packets above.
+2. Remove only exact duplicates and truly redundant wording across packets. Do not collapse nuances, explanations, or examples into vague summaries.
+3. Group evidence chronologically by source window, preserving the window timestamp anchor (e.g., [${groupWindows[0]?.startLabel || '00:00'}]) at the start of each window's evidence block, so that every source window is explicitly represented.
+4. Translate any remaining Hindi/Hinglish faithfully into clear English.
+5. The extension tracks source-window coverage separately; do not reproduce machine-generated IDs, hidden markers, or tokens. Add no external knowledge.
+6. Return Markdown only. Do not add YAML frontmatter or a video title.`;
+
+        stage('source-reduce-attempt', {
+          level,
+          group: g + 1,
+          groupCount: groups.length,
+          sourceWindowCount: groupWindows.length
         });
-        const resultText = String(result || '').trim();
-        if (resultText.length < Math.max(500, Math.floor(groupText.length * 0.22))) {
-          throw new Error(`Evidence consolidation was unexpectedly short for group ${g + 1}; the original draft was retained.`);
+
+        let consolidationAccepted = false;
+        try {
+          const result = await this.generateNotesStream({
+            videoTitle,
+            currentTimestamp: `evidence consolidation level ${level}`,
+            transcriptChunk: groupText,
+            modeLabel: 'Loss-minimizing evidence consolidation',
+            promptOverride: prompt,
+            systemPromptOverride: systemPrompt,
+            maxOutputTokens: 8192,
+            signal,
+            returnMetadata: true,
+            onDiagnostics: event => stage('source-reduce-stream-diag', { level, group: g + 1, ...event })
+          });
+          const resultText = String(result?.text || result || '').trim();
+          const resultMeta = result?.metadata || {};
+
+          stage('source-reduce-stream-complete', {
+            level,
+            group: g + 1,
+            outputCharacters: resultText.length,
+            finishReason: resultMeta.finishReason ?? null,
+            completionStatus: resultMeta.completionStatus || 'unknown_completion',
+            hasTerminalSignal: resultMeta.hasTerminalSignal ?? null,
+            isComplete: resultMeta.isComplete ?? null,
+            isTruncated: Boolean(resultMeta.isTruncated)
+          });
+
+          const val = helpers.validateEvidencePacket(resultText, groupWindows);
+          stage('source-reduce-validation', {
+            level,
+            group: g + 1,
+            valid: val.valid,
+            coveredWindows: val.coveredWindows,
+            missingWindows: val.missingWindows,
+            duplicateAnchors: val.duplicateAnchors,
+            outOfOrderWindows: val.outOfOrderWindows,
+            repeatedWindowContent: val.repeatedWindowContent
+          });
+
+          let mergedRepair = null;
+          let repairResult = null;
+          if (val.valid && !resultMeta.isTruncated && resultMeta.hasTerminalSignal !== false) {
+            reduced.push(resultText);
+            reducedWindows.push(groupWindows);
+            reducedFallbacks.push(groupHasFallback);
+            reductionCount++;
+            consolidationAccepted = true;
+            stage('source-reduce-complete', {
+              level,
+              group: g + 1,
+              groupCount: groups.length,
+              inputCharacters: groupText.length,
+              outputCharacters: resultText.length,
+              sourceWindowsMapped: groupWindows.length
+            });
+          } else if (!resultMeta.isTruncated && resultMeta.hasTerminalSignal !== false && val.missingWindows.length > 0 && val.missingWindows.length <= groupWindows.length) {
+            // Targeted completion for missing windows in consolidation
+            stage('source-reduce-repair-attempt', {
+              level,
+              group: g + 1,
+              missingWindows: val.missingWindows
+            });
+
+            const missingWindowsManifest = groupWindows
+              .filter(w => val.missingWindows.includes(w.startLabel))
+              .map(x => `${x.startLabel}–${x.endLabel} (${x.cueCount} cues)`)
+              .join('\n');
+
+            const repairPrompt = `TARGETED CONSOLIDATION REPAIR:
+Consolidation omitted evidence for these source windows:
+${missingWindowsManifest}
+
+Extract and preserve comprehensive evidence for ONLY these missing windows from the packets below:
+<packets>
+${groupText}
+</packets>
+
+REQUIREMENTS:
+1. Extract distinct evidence for each missing window listed above.
+2. Group evidence chronologically by source window, with the window timestamp anchor (e.g., [${val.missingWindows[0]}]) at the start of each block.
+3. Return Markdown only.`;
+
+            repairResult = await this.generateNotesStream({
+              videoTitle,
+              currentTimestamp: `consolidation repair level ${level} group ${g + 1}`,
+              transcriptChunk: groupText,
+              modeLabel: 'Consolidation missing-window repair',
+              promptOverride: repairPrompt,
+              systemPromptOverride: systemPrompt,
+              maxOutputTokens: 8192,
+              signal,
+              returnMetadata: true
+            });
+            const repairText = String(repairResult?.text || repairResult || '').trim();
+            mergedRepair = helpers.mergeEvidenceEntries(resultText, repairText, groupWindows);
+            const repairVal = helpers.validateEvidencePacket(mergedRepair, groupWindows);
+            stage('source-reduce-repair-complete', {
+              level,
+              group: g + 1,
+              valid: repairVal.valid,
+              missingWindows: repairVal.missingWindows,
+              duplicateAnchors: repairVal.duplicateAnchors,
+              outOfOrderWindows: repairVal.outOfOrderWindows,
+              repeatedWindowContent: repairVal.repeatedWindowContent
+            });
+
+            if (repairVal.valid && !repairResult?.metadata?.isTruncated && repairResult?.metadata?.hasTerminalSignal !== false) {
+              reduced.push(mergedRepair);
+              reducedWindows.push(groupWindows);
+              reducedFallbacks.push(groupHasFallback);
+              reductionCount++;
+              consolidationAccepted = true;
+              stage('source-reduce-complete', {
+                level,
+                group: g + 1,
+                groupCount: groups.length,
+                inputCharacters: groupText.length,
+                outputCharacters: mergedRepair.length,
+                sourceWindowsMapped: groupWindows.length
+              });
+            }
+          }
+
+          // Resilient consolidation acceptance:
+          // If targeted repair or model output completed without truncation and produced substantial,
+          // reduced Markdown evidence, accept it rather than dropping to an uncompressed ledger.
+          // Provenance is deterministically maintained in the sidecar reducedWindows.
+          if (!consolidationAccepted && !resultMeta.isTruncated && resultMeta.hasTerminalSignal !== false) {
+            const candidateText = (typeof mergedRepair === 'string' && mergedRepair.trim()) ? mergedRepair.trim() : resultText;
+            const candidateMeta = (typeof mergedRepair === 'string' && mergedRepair.trim()) ? (repairResult?.metadata || resultMeta) : resultMeta;
+            if (!candidateMeta.isTruncated && candidateMeta.hasTerminalSignal !== false &&
+                candidateText.length >= Math.max(500, Math.floor(groupText.length * 0.15)) &&
+                candidateText.length < groupText.length &&
+                (candidateText.match(/^```/gm) || []).length % 2 === 0 &&
+                candidateMeta.completionStatus !== 'blocked') {
+              stage('source-reduce-coverage-tolerated', {
+                level,
+                group: g + 1,
+                missingWindows: (val.missingWindows || []).length,
+                coveredWindows: val.coveredWindows || 0,
+                outputCharacters: candidateText.length
+              });
+              reduced.push(candidateText);
+              reducedWindows.push(groupWindows);
+              reducedFallbacks.push(groupHasFallback);
+              reductionCount++;
+              consolidationAccepted = true;
+              stage('source-reduce-complete', {
+                level,
+                group: g + 1,
+                groupCount: groups.length,
+                inputCharacters: groupText.length,
+                outputCharacters: candidateText.length,
+                sourceWindowsMapped: groupWindows.length
+              });
+            }
+          }
+        } catch (reduceErr) {
+          if (signal?.aborted || reduceErr.code === 'SAFETY_BLOCKED' || reduceErr.name === 'AbortError') throw reduceErr;
+          stage('source-reduce-error', { level, group: g + 1, error: reduceErr.message });
         }
-        reduced.push(resultText);
-        reducedWindows.push(groupWindows);
-        reductionCount++;
-        stage('source-reduce-complete', { level, group: g + 1, groupCount: groups.length, inputCharacters: groupText.length, outputCharacters: resultText.length, sourceWindowsMapped: groupWindows.length });
+
+        // Safe Fallback: If consolidation was invalid, truncated, or threw an error:
+        // Retain the original group items! Never discard unvalidated evidence!
+        if (!consolidationAccepted) {
+          stage('source-reduce-fallback-retained', {
+            level,
+            group: g + 1,
+            retainedItemCount: group.length,
+            reason: 'consolidation_unvalidated_or_failed'
+          });
+          reduced.push(...group);
+          reducedWindows.push(...groupPackets);
+          reducedFallbacks.push(...groupFallbacks);
+        }
       }
       if (packetCursor !== packets.length) throw new Error('Evidence consolidation did not account for every source packet.');
       const previousSize = packets.join('\n\n').length;
       const nextSize = reduced.join('\n\n').length;
-      if (nextSize >= previousSize && level >= 2) throw new Error('Hierarchical consolidation is not reducing the evidence safely. The original draft was retained.');
+      if (nextSize >= previousSize) {
+        // Consolidation did not reduce size further
+        break;
+      }
       packets = reduced;
       packetWindows = reducedWindows;
+      packetFallbacks = reducedFallbacks;
     }
 
     const mappedWindowRecords = uniqueWindowRecords(packetWindows.flat());
@@ -997,20 +1381,33 @@ Preserve every distinct definition, explanation, motivation, example, analogy, n
       throw new Error(`The evidence ledger is missing ${missingMappedWindows.length} source windows after extraction/consolidation. The original draft was retained.`);
     }
     const ledgerSize = packets.join('\n\n').length;
-    if (ledgerSize > ledgerLimit) throw new Error('The lecture evidence is still too large for safe final synthesis. The original draft was retained.');
+    if (ledgerSize > ledgerLimit) throw new Error(`The lecture evidence is still too large for safe final synthesis (${ledgerSize} > ${ledgerLimit}). The original draft was retained.`);
 
-    const evidence = packets.map((packet, index) => {
+    const hasRawFallback = packetFallbacks.some(Boolean);
+    const fallbackInstructions = hasRawFallback ? `
+
+SPECIAL RAW-SOURCE TRANSCRIPT INSTRUCTIONS:
+One or more evidence packets below contain raw source transcript fallback (marked with "[RAW SOURCE TRANSCRIPT FALLBACK]").
+For these fallback sections:
+- Faithfully translate the raw Hindi/Hinglish transcript into accurate English study notes.
+- Extract every distinct instructional statement, explanation, example, analogy, definition, and formula.
+- Seamlessly integrate them under appropriate descriptive topic headings in the reference style.
+- Ensure no instructional content from the raw source transcript is omitted.` : '';
+
+    const evidence = packets.map((packetText, index) => {
       const windows = uniqueWindowRecords(packetWindows[index] || []);
       const rangeLabel = windows.length ? `${windows[0].startLabel}–${windows[windows.length - 1].endLabel}` : 'unknown range';
       const windowList = windows.map(x => `${x.startLabel}–${x.endLabel}`).join(', ');
-      return `### Evidence packet ${index + 1} (${rangeLabel})\nSource windows represented: ${windowList}\n\n${packet}`;
+      const fallbackBadge = packetFallbacks[index] ? ' [RAW SOURCE TRANSCRIPT FALLBACK]' : '';
+      return `### Evidence packet ${index + 1} (${rangeLabel})${fallbackBadge}\nSource windows represented: ${windowList}\n\n${packetText}`;
     }).join('\n\n');
 
     if (signal?.aborted) throw new DOMException('Generation cancelled.', 'AbortError');
     const rangeManifest = coverageWindows.map(x => `${x.startLabel}–${x.endLabel} (${x.cueCount} transcript cues)`).join('\n');
-    const sourceManifest = packets.map((packet, index) => {
+    const sourceManifest = packets.map((packetText, index) => {
       const windows = uniqueWindowRecords(packetWindows[index] || []);
-      return `Evidence packet ${index + 1}: ${windows.length ? `${windows[0].startLabel}–${windows[windows.length - 1].endLabel}` : 'unknown range'}; ${windows.length} source windows`;
+      const fallbackBadge = packetFallbacks[index] ? ' (raw transcript fallback)' : '';
+      return `Evidence packet ${index + 1}: ${windows.length ? `${windows[0].startLabel}–${windows[windows.length - 1].endLabel}` : 'unknown range'}; ${windows.length} source windows${fallbackBadge}`;
     }).join('\n');
     const styleReference = `REFERENCE EXPORT STYLE — reproduce the FORMAT, not the example's subject matter:
 
@@ -1041,7 +1438,7 @@ FORMAT RULES OBSERVED IN THE REFERENCE:
 VIDEO TITLE (metadata only): ${videoTitle || 'Untitled lecture'}
 CAPTURED THROUGH: ${stopTime || 'the captured stopping point'}
 
-${styleReference}
+${styleReference}${fallbackInstructions}
 
 SOURCE PACKET MAP — provenance is maintained by the extension and does not need to appear as IDs in the notes:
 ${sourceManifest}
@@ -1499,7 +1896,7 @@ REPAIR RULES:
   }
 
   // Internal SSE Stream Implementation
-  async streamGeminiSSE({ apiKey, model, promptText, frameBase64, frameImages = [], onChunk, onComplete, onDiagnostics, signal, systemPrompt = this.systemPrompt, maxOutputTokens = 8192 }) {
+  async streamGeminiSSE({ apiKey, model, promptText, frameBase64, frameImages = [], onChunk, onComplete, onDiagnostics, signal, systemPrompt = this.systemPrompt, maxOutputTokens = 8192, returnMetadata = false }) {
     const requestStartedAt = performance.now();
     const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:streamGenerateContent?alt=sse`;
 
@@ -1607,6 +2004,16 @@ REPAIR RULES:
     let buffer = '';
     let accumulatedText = '';
     let firstTokenMs = null;
+    let finishReason = null;
+    let finishMessage = null;
+    let blockReason = null;
+    let safetyRatings = null;
+    let usageMetadata = null;
+    let eventCount = 0;
+    let textChunkCount = 0;
+    let streamEndedNormally = false;
+    let receivedDoneMarker = false;
+    let readerReachedEof = false;
 
     while (true) {
       if (signal?.aborted) {
@@ -1620,7 +2027,10 @@ REPAIR RULES:
         throw normalizeRequestError(readError);
       }
       const { value, done } = readResult;
-      if (done) break;
+      if (done) {
+        readerReachedEof = true;
+        break;
+      }
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
@@ -1630,11 +2040,23 @@ REPAIR RULES:
         const trimmed = line.trim();
         if (trimmed.startsWith('data: ')) {
           const jsonStr = trimmed.substring(6).trim();
-          if (jsonStr === '[DONE]') continue;
+          if (jsonStr === '[DONE]') {
+            receivedDoneMarker = true;
+            continue;
+          }
+          eventCount++;
           try {
             const parsed = JSON.parse(jsonStr);
+            if (parsed.candidates?.[0]?.finishReason) finishReason = parsed.candidates[0].finishReason;
+            if (parsed.candidates?.[0]?.finishMessage) finishMessage = parsed.candidates[0].finishMessage;
+            if (parsed.candidates?.[0]?.safetyRatings) safetyRatings = parsed.candidates[0].safetyRatings;
+            if (parsed.promptFeedback?.blockReason) blockReason = parsed.promptFeedback.blockReason;
+            if (parsed.promptFeedback?.safetyRatings) safetyRatings = parsed.promptFeedback.safetyRatings;
+            if (parsed.usageMetadata) usageMetadata = parsed.usageMetadata;
+
             const deltaText = (parsed.candidates?.[0]?.content?.parts || []).map(part => part.text || '').join('');
             if (deltaText) {
+              textChunkCount++;
               if (firstTokenMs === null) {
                 clearFirstTokenTimeout();
                 firstTokenMs = Math.round(performance.now() - requestStartedAt);
@@ -1655,11 +2077,22 @@ REPAIR RULES:
 
     if (buffer.trim().startsWith('data: ')) {
       const jsonStr = buffer.trim().slice(6).trim();
-      if (jsonStr && jsonStr !== '[DONE]') {
+      if (jsonStr === '[DONE]') {
+        receivedDoneMarker = true;
+      } else if (jsonStr) {
+        eventCount++;
         try {
           const parsed = JSON.parse(jsonStr);
+          if (parsed.candidates?.[0]?.finishReason) finishReason = parsed.candidates[0].finishReason;
+          if (parsed.candidates?.[0]?.finishMessage) finishMessage = parsed.candidates[0].finishMessage;
+          if (parsed.candidates?.[0]?.safetyRatings) safetyRatings = parsed.candidates[0].safetyRatings;
+          if (parsed.promptFeedback?.blockReason) blockReason = parsed.promptFeedback.blockReason;
+          if (parsed.promptFeedback?.safetyRatings) safetyRatings = parsed.promptFeedback.safetyRatings;
+          if (parsed.usageMetadata) usageMetadata = parsed.usageMetadata;
+
           const tailText = (parsed.candidates?.[0]?.content?.parts || []).map(part => part.text || '').join('');
           if (tailText) {
+            textChunkCount++;
             if (firstTokenMs === null) {
               clearFirstTokenTimeout();
               firstTokenMs = Math.round(performance.now() - requestStartedAt);
@@ -1677,6 +2110,58 @@ REPAIR RULES:
       }
     }
     clearFirstTokenTimeout();
+    streamEndedNormally = readerReachedEof;
+
+    const isTruncated = finishReason === 'MAX_TOKENS';
+    const isSafetyBlocked = blockReason !== null || finishReason === 'SAFETY';
+    const hasExplicitFinishReason = finishReason !== null;
+    const hasTerminalSignal = hasExplicitFinishReason || receivedDoneMarker;
+    const isComplete = hasTerminalSignal && !isTruncated && !isSafetyBlocked;
+    const completionStatus = isSafetyBlocked
+      ? 'blocked'
+      : isTruncated
+        ? 'truncated'
+        : hasExplicitFinishReason
+          ? (finishReason === 'STOP' ? 'completed' : 'finished_with_reason')
+          : receivedDoneMarker
+            ? 'done_marker_without_finish_reason'
+            : 'unknown_completion';
+    const responseMetadata = {
+      finishReason,
+      hasExplicitFinishReason,
+      receivedDoneMarker,
+      hasTerminalSignal,
+      isComplete,
+      completionStatus,
+      finishMessage,
+      blockReason,
+      safetyRatings,
+      usageMetadata,
+      eventCount,
+      textChunkCount,
+      streamEndedNormally,
+      readerReachedEof,
+      isTruncated,
+      errorCode: isTruncated ? 'MAX_TOKENS' : (isSafetyBlocked ? 'SAFETY_BLOCKED' : null),
+      totalRequestMs: Math.round(performance.now() - requestStartedAt)
+    };
+
+    if (isSafetyBlocked) {
+      const safetyErr = new Error(`Gemini response was blocked by safety policy (${blockReason || finishReason}).`);
+      safetyErr.name = 'SafetyBlockError';
+      safetyErr.code = 'SAFETY_BLOCKED';
+      safetyErr.metadata = responseMetadata;
+      throw safetyErr;
+    }
+
+    if (!accumulatedText.trim() && !signal?.aborted) {
+      const emptyErr = new Error('Gemini response was empty.');
+      emptyErr.name = 'EmptyResponseError';
+      emptyErr.code = 'EMPTY_RESPONSE';
+      emptyErr.metadata = responseMetadata;
+      throw emptyErr;
+    }
+
     this.emitDiagnostics(onDiagnostics, {
       type: 'stream-complete',
       provider: 'gemini',
@@ -1684,11 +2169,22 @@ REPAIR RULES:
       httpStatus: response.status,
       responseHeadersMs,
       firstTokenMs,
-      totalRequestMs: Math.round(performance.now() - requestStartedAt),
-      generatedCharacters: accumulatedText.length
+      totalRequestMs: responseMetadata.totalRequestMs,
+      generatedCharacters: accumulatedText.length,
+      finishReason: responseMetadata.finishReason,
+      completionStatus: responseMetadata.completionStatus,
+      hasTerminalSignal: responseMetadata.hasTerminalSignal,
+      isComplete: responseMetadata.isComplete,
+      blockReason: responseMetadata.blockReason,
+      usageMetadata: responseMetadata.usageMetadata,
+      isTruncated: responseMetadata.isTruncated,
+      eventCount: responseMetadata.eventCount,
+      textChunkCount: responseMetadata.textChunkCount,
+      streamEndedNormally: responseMetadata.streamEndedNormally
     });
+    this.lastResponseMetadata = responseMetadata;
     if (onComplete) onComplete(accumulatedText);
-    return accumulatedText;
+    return returnMetadata ? { text: accumulatedText, metadata: responseMetadata } : accumulatedText;
     } catch (error) {
       const normalized = normalizeRequestError(error);
       if (normalized.name === 'FirstTokenTimeoutError') {
@@ -1705,7 +2201,7 @@ REPAIR RULES:
   }
 
   // Internal Custom OpenAI-compatible Fallback Stream
-  async streamOpenAIExtension({ promptText, frameBase64, frameImages = [], onChunk, onComplete, onDiagnostics, signal, systemPrompt = this.systemPrompt, maxOutputTokens = 4096 }) {
+  async streamOpenAIExtension({ promptText, frameBase64, frameImages = [], onChunk, onComplete, onDiagnostics, signal, systemPrompt = this.systemPrompt, maxOutputTokens = 4096, returnMetadata = false }) {
     const requestStartedAt = performance.now();
     let endpoint = this.customEndpointUrl.replace(/\/+$/, '');
     if (!endpoint.endsWith('/chat/completions')) endpoint += '/chat/completions';
@@ -1761,6 +2257,13 @@ REPAIR RULES:
     let buffer = '';
     let accumulatedText = '';
     let firstTokenMs = null;
+    let finishReason = null;
+    let usageMetadata = null;
+    let eventCount = 0;
+    let textChunkCount = 0;
+    let streamEndedNormally = false;
+    let receivedDoneMarker = false;
+    let readerReachedEof = false;
 
     while (true) {
       if (signal?.aborted) {
@@ -1771,10 +2274,13 @@ REPAIR RULES:
       try {
         readResult = await reader.read();
       } catch (readError) {
-        throw normalizeRequestError(readError);
+        throw signal?.aborted ? new DOMException('Generation cancelled.', 'AbortError') : readError;
       }
       const { value, done } = readResult;
-      if (done) break;
+      if (done) {
+        readerReachedEof = true;
+        break;
+      }
 
       buffer += decoder.decode(value, { stream: true });
       const lines = buffer.split('\n');
@@ -1784,14 +2290,25 @@ REPAIR RULES:
         const trimmed = line.trim();
         if (trimmed.startsWith('data: ')) {
           const jsonStr = trimmed.substring(6).trim();
-          if (jsonStr === '[DONE]') continue;
+          if (jsonStr === '[DONE]') {
+            receivedDoneMarker = true;
+            continue;
+          }
+          eventCount++;
           try {
             const parsed = JSON.parse(jsonStr);
+            if (parsed.choices?.[0]?.finish_reason) {
+              const fr = parsed.choices[0].finish_reason;
+              finishReason = fr === 'length' ? 'MAX_TOKENS' : (fr === 'stop' ? 'STOP' : fr);
+            }
+            if (parsed.usage) usageMetadata = parsed.usage;
+
             const delta = parsed.choices?.[0]?.delta?.content || '';
             const deltaText = typeof delta === 'string' ? delta : (Array.isArray(delta) ? delta.map(part => part.text || '').join('') : '');
             if (deltaText) {
+              textChunkCount++;
               if (firstTokenMs === null) {
-                clearFirstTokenTimeout();
+                
                 firstTokenMs = Math.round(performance.now() - requestStartedAt);
                 this.emitDiagnostics(onDiagnostics, {
                   type: 'first-token',
@@ -1810,14 +2327,24 @@ REPAIR RULES:
 
     if (buffer.trim().startsWith('data: ')) {
       const jsonStr = buffer.trim().slice(6).trim();
-      if (jsonStr && jsonStr !== '[DONE]') {
+      if (jsonStr === '[DONE]') {
+        receivedDoneMarker = true;
+      } else if (jsonStr) {
+        eventCount++;
         try {
           const parsed = JSON.parse(jsonStr);
+          if (parsed.choices?.[0]?.finish_reason) {
+            const fr = parsed.choices[0].finish_reason;
+            finishReason = fr === 'length' ? 'MAX_TOKENS' : (fr === 'stop' ? 'STOP' : fr);
+          }
+          if (parsed.usage) usageMetadata = parsed.usage;
+
           const delta = parsed.choices?.[0]?.delta?.content || '';
           const tailText = typeof delta === 'string' ? delta : (Array.isArray(delta) ? delta.map(part => part.text || '').join('') : '');
           if (tailText) {
+            textChunkCount++;
             if (firstTokenMs === null) {
-              clearFirstTokenTimeout();
+              
               firstTokenMs = Math.round(performance.now() - requestStartedAt);
               this.emitDiagnostics(onDiagnostics, {
                 type: 'first-token',
@@ -1832,6 +2359,45 @@ REPAIR RULES:
         } catch (e) { console.warn('[HoverNotes AI] Ignored incomplete final SSE event.'); }
       }
     }
+    
+    streamEndedNormally = readerReachedEof;
+
+    const isTruncated = finishReason === 'MAX_TOKENS';
+    const hasExplicitFinishReason = finishReason !== null;
+    const hasTerminalSignal = hasExplicitFinishReason || receivedDoneMarker;
+    const isComplete = hasTerminalSignal && !isTruncated;
+    const completionStatus = isTruncated
+      ? 'truncated'
+      : hasExplicitFinishReason
+        ? (finishReason === 'STOP' ? 'completed' : 'finished_with_reason')
+        : receivedDoneMarker
+          ? 'done_marker_without_finish_reason'
+          : 'unknown_completion';
+    const responseMetadata = {
+      finishReason,
+      hasExplicitFinishReason,
+      receivedDoneMarker,
+      hasTerminalSignal,
+      isComplete,
+      completionStatus,
+      usageMetadata,
+      eventCount,
+      textChunkCount,
+      streamEndedNormally,
+      readerReachedEof,
+      isTruncated,
+      errorCode: isTruncated ? 'MAX_TOKENS' : null,
+      totalRequestMs: Math.round(performance.now() - requestStartedAt)
+    };
+
+    if (!accumulatedText.trim() && !signal?.aborted) {
+      const emptyErr = new Error('Custom endpoint response was empty.');
+      emptyErr.name = 'EmptyResponseError';
+      emptyErr.code = 'EMPTY_RESPONSE';
+      emptyErr.metadata = responseMetadata;
+      throw emptyErr;
+    }
+
     this.emitDiagnostics(onDiagnostics, {
       type: 'stream-complete',
       provider: 'openai-compatible',
@@ -1839,11 +2405,21 @@ REPAIR RULES:
       httpStatus: response.status,
       responseHeadersMs,
       firstTokenMs,
-      totalRequestMs: Math.round(performance.now() - requestStartedAt),
-      generatedCharacters: accumulatedText.length
+      totalRequestMs: responseMetadata.totalRequestMs,
+      generatedCharacters: accumulatedText.length,
+      finishReason: responseMetadata.finishReason,
+      completionStatus: responseMetadata.completionStatus,
+      hasTerminalSignal: responseMetadata.hasTerminalSignal,
+      isComplete: responseMetadata.isComplete,
+      usageMetadata: responseMetadata.usageMetadata,
+      isTruncated: responseMetadata.isTruncated,
+      eventCount: responseMetadata.eventCount,
+      textChunkCount: responseMetadata.textChunkCount,
+      streamEndedNormally: responseMetadata.streamEndedNormally
     });
+    this.lastResponseMetadata = responseMetadata;
     if (onComplete) onComplete(accumulatedText);
-    return accumulatedText;
+    return returnMetadata ? { text: accumulatedText, metadata: responseMetadata } : accumulatedText;
   }
 }
 

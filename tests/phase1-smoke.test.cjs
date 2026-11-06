@@ -28,8 +28,17 @@ function sseResponse(body, status = 200) {
   }), { status, headers: { 'Content-Type': 'text/event-stream' } });
 }
 function streamText(text) {
-  return sseResponse(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text }] } }] })}`);
+  return sseResponse(`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text }] }, finishReason: 'STOP' }] })}\n\ndata: [DONE]\n\n`);
 }
+
+function evidenceForPrompt(prompt, detailPrefix = 'Source-grounded teaching detail') {
+  const included = prompt.match(/SOURCE WINDOWS INCLUDED IN THIS PACKET:\n([\s\S]*?)\n\nORIGINAL TIMESTAMPED TRANSCRIPT/);
+  const represented = prompt.match(/SOURCE WINDOWS REPRESENTED IN THIS GROUP[^\n]*\n([\s\S]*?)\n\nEVIDENCE PACKETS/);
+  const manifest = included?.[1] || represented?.[1] || '';
+  const labels = [...manifest.matchAll(/(?:^|\n)(\d{2}:\d{2})–/g)].map(match => match[1]);
+  return labels.map((label, index) => `### [${label}]\n- ${detailPrefix} ${index + 1}: a distinct, source-backed explanation with supporting detail.`).join('\n\n');
+}
+
 function comprehensiveMarkdown() {
   return `### GATE Exam Preparation Course
 - **[Teaching Strategy]** The instructor describes a structured course for the GATE syllabus.
@@ -108,7 +117,7 @@ function comprehensiveMarkdown() {
       imagePartsSeen = payload.contents[0].parts.filter(part => part.inlineData).length;
       assert.match(prompt, /SOURCE WINDOWS INCLUDED IN THIS PACKET/);
       assert.doesNotMatch(prompt, /HN_TIME_|HN_SOURCE_|REQUIRED MARKERS/);
-      return streamText(`### Extracted Evidence\n- Course begins from fundamentals.\n- DSA requires conceptual clarity.\n${'Preserved distinct source evidence. '.repeat(30)}`);
+      return streamText(`### [00:00] Course Introduction\n- Course begins from fundamentals with supporting explanation.\n\n### [01:00] DSA Fundamentals\n- DSA requires conceptual clarity and deep understanding. ${'Preserved distinct source evidence. '.repeat(10)}`);
     }
     if (/SECOND-PASS SOURCE-TO-NOTE COVERAGE AUDIT/.test(prompt)) {
       assert.match(prompt, /ORIGINAL TIMESTAMPED TRANSCRIPT/);
@@ -188,7 +197,7 @@ function comprehensiveMarkdown() {
     if (/Build a comprehensive, loss-minimizing evidence packet/.test(prompt)) {
       longMapCalls++;
       assert.doesNotMatch(prompt, /HN_TIME_|HN_SOURCE_|REQUIRED MARKERS/);
-      return streamText(`### Source Evidence ${longMapCalls}\n- This packet preserves explanations, examples, details and exam context.\n${'Additional grounded teaching detail. '.repeat(180)}`);
+      return streamText(evidenceForPrompt(prompt, `Packet ${longMapCalls} preserves explanations, examples, details and exam context. ${'Distinct supporting lecture evidence and qualifications. '.repeat(150)}`));
     }
     if (/SECOND-PASS SOURCE-TO-NOTE COVERAGE AUDIT/.test(prompt)) {
       return streamText('{"omissions":[],"unsupported_claims":[]}');
@@ -203,7 +212,7 @@ function comprehensiveMarkdown() {
       reduceCalls++;
       assert.match(prompt, /SOURCE WINDOWS REPRESENTED IN THIS GROUP/);
       assert.doesNotMatch(prompt, /HN_TIME_|HN_SOURCE_|REQUIRED MARKERS/);
-      return streamText(`### Consolidated Evidence\n- The consolidated packet preserves source details and distinct examples.\n${'Preserved evidence detail. '.repeat(180)}`);
+      return streamText(evidenceForPrompt(prompt, 'The consolidated packet preserves source details and distinct examples'));
     }
     finalCalls++;
     assert.doesNotMatch(prompt, /HN_TIME_|HN_SOURCE_/);
@@ -232,7 +241,7 @@ function comprehensiveMarkdown() {
     const payload = JSON.parse(options.body);
     const prompt = payload.contents[0].parts.find(part => part.text)?.text || '';
     if (/Build a comprehensive, loss-minimizing evidence packet/.test(prompt)) {
-      return streamText(`### Extracted Evidence\n- Course begins from fundamentals.\n- DSA requires conceptual clarity.\n${'Distinct grounded evidence. '.repeat(35)}`);
+      return streamText(evidenceForPrompt(prompt, 'Course begins from fundamentals and DSA requires conceptual clarity'));
     }
     if (/SECOND-PASS SOURCE-TO-NOTE COVERAGE AUDIT/.test(prompt)) {
       repairAuditCalls++;
@@ -273,7 +282,7 @@ function comprehensiveMarkdown() {
     const payload = JSON.parse(options.body);
     const prompt = payload.contents[0].parts.find(part => part.text)?.text || '';
     if (/Build a comprehensive, loss-minimizing evidence packet/.test(prompt)) {
-      return streamText(`### Extracted Evidence\n- Course begins from fundamentals.\n${'Grounded instructional detail. '.repeat(35)}`);
+      return streamText(evidenceForPrompt(prompt, 'Course begins from fundamentals with grounded instructional detail'));
     }
     if (/SECOND-PASS SOURCE-TO-NOTE COVERAGE AUDIT/.test(prompt)) {
       failClosedAuditCalls++;

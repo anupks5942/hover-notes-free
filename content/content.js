@@ -171,6 +171,15 @@
       return;
     }
 
+    // 2b. Ignore empty aborted responses (status 0, no body, no readError) so pending waiter stays open
+    if (Number(payload.status || 0) === 0 && !payload.body?.trim() && !payload.readError && !payload.bodyTooLarge) {
+      console.warn('[HoverNotes Captions] Ignoring empty/aborted response for active waiter', {
+        requestId,
+        videoId
+      });
+      return;
+    }
+
     const waiter = captionBodyWaiters.get(requestId);
 
     // 3. Verify videoId matches the waiter.
@@ -693,7 +702,7 @@
     // Attempt 1: Request fresh player response with correlated requestId
     let attempt = 1;
     let requestId = generateCaptionRequestId();
-    let bodyPromise = waitForPlayerCaptionBody(videoId, bestTrack, requestId, 32000);
+    let bodyPromise = waitForPlayerCaptionBody(videoId, bestTrack, requestId, 12000);
     const playerWaitStartedAt = performanceNow();
     requestPlayerCaptionBody(videoId, bestTrack, requestId, false);
     let response = await bodyPromise;
@@ -712,20 +721,21 @@
       parsedItems = parseResult.cues || [];
     }
 
-    // Bounded fresh recovery: Exactly ONE controlled retry on 0-cue failure (unless timed out)
-    if (parsedItems.length === 0 && !response.timeout) {
+    // Bounded fresh recovery: Exactly ONE controlled retry on 0-cue failure or timeout
+    if (parsedItems.length === 0) {
       attempt = 2;
       const retryRequestId = generateCaptionRequestId();
-      console.warn('[HoverNotes Captions] Attempt 1 produced zero cues; performing fresh retry with forced track reactivation', {
+      console.warn('[HoverNotes Captions] Attempt 1 produced zero cues (or timed out); performing fresh retry with forced track reactivation', {
         videoId,
         trackKey,
         attempt1RequestId: requestId,
         attempt2RequestId: retryRequestId,
-        attempt1Characters: response.responseCharacters || 0
+        attempt1Characters: response.responseCharacters || 0,
+        attempt1Timeout: Boolean(response.timeout)
       });
 
       const retryWaitStartedAt = performanceNow();
-      const retryBodyPromise = waitForPlayerCaptionBody(videoId, bestTrack, retryRequestId, 32000);
+      const retryBodyPromise = waitForPlayerCaptionBody(videoId, bestTrack, retryRequestId, 18000);
       requestPlayerCaptionBody(videoId, bestTrack, retryRequestId, true);
       const retryResponse = await retryBodyPromise;
       playerWaitMs += Math.round(performanceNow() - retryWaitStartedAt);
@@ -750,7 +760,7 @@
     if (parsedItems.length === 0) {
       if (!response.body?.trim()) {
         const reason = response.timeout
-          ? 'The player did not issue a timed-text request for the selected caption track within 32 seconds.'
+          ? 'The player did not issue a timed-text request for the selected caption track within the expected timeout.'
           : response.bodyTooLarge
             ? `The player caption response was too large (${response.responseCharacters} characters).`
             : response.readError

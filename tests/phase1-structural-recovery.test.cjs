@@ -24,7 +24,7 @@ vm.runInThisContext(fs.readFileSync('sidebar/note-synthesis.js', 'utf8'), { file
 vm.runInThisContext(fs.readFileSync('sidebar/gemini-client.js', 'utf8'), { filename: 'sidebar/gemini-client.js' });
 
 function streamText(value) {
-  const payload = `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: value }] } }] })}\n\n`;
+  const payload = `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: value }] }, finishReason: 'STOP' }] })}\n\ndata: [DONE]\n\n`;
   return new Response(new ReadableStream({
     start(controller) {
       controller.enqueue(new TextEncoder().encode(payload));
@@ -106,7 +106,9 @@ const recoveredNote = [
     const prompt = request.contents[0].parts.find(part => part.text)?.text || '';
     if (/Build a comprehensive, loss-minimizing evidence packet/.test(prompt)) {
       evidenceCalls++;
-      return streamText(`### Evidence Packet\n${Array.from({ length: 45 }, (_, i) => `- Source-supported instructional detail ${i + 1} is preserved with its explanation, example and qualification.`).join('\n')}`);
+      const sourceLabels = [...prompt.matchAll(/^([0-9]{2}:[0-9]{2})–/gm)].map(match => match[1]);
+      const packet = sourceLabels.map((label, i) => `### [${label}]\n- Source-supported instructional detail ${i + 1} is preserved with its explanation, example and qualification.`).join('\n\n');
+      return streamText(packet);
     }
     if (/EDITORIAL STRUCTURE RECOVERY/.test(prompt)) {
       editorialRepairCalls++;

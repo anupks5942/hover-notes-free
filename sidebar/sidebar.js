@@ -162,9 +162,12 @@
   // Bridge Communication with Content Script
   // =========================================================================
 
-  function sendBridgeMessage(action, payload = {}) {
+  function sendBridgeMessage(action, payload = {}, timeoutMs = null) {
     return new Promise((resolve) => {
       const requestId = 'req_' + Math.random().toString(36).substring(2, 9);
+      const effectiveTimeout = Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? timeoutMs
+        : (action === 'GET_TRANSCRIPT_SLICE' ? 65000 : 35000);
 
       let timeoutId = null;
       const responseListener = (event) => {
@@ -180,7 +183,7 @@
       timeoutId = setTimeout(() => {
         window.removeEventListener('message', responseListener);
         resolve({ success: false, error: 'Bridge request timed out' });
-      }, 30000);
+      }, effectiveTimeout);
 
       window.parent.postMessage({ action, payload, requestId }, '*');
     });

@@ -1,6 +1,36 @@
-# My HoverNotes — v1.0.29
+# My HoverNotes — v1.0.32
 
-Build: 1.0.29
+Build: 1.0.32
+
+## v1.0.32 — Player timed-text abort tolerance, bridge timeout alignment & evidence consolidation recovery
+
+- **Bridge Timeout Alignment:** Increased `GET_TRANSCRIPT_SLICE` bridge message timeout from 30s to 65s in `sidebar/sidebar.js`, ensuring sidebar bridge requests never abort prematurely while the content script executes its bounded multi-attempt caption resolution lifecycle.
+- **Player TimedText Abort Tolerance:** Updated `content/youtube-main.js` and `content/content.js` to recognize and ignore transient aborted network requests (`HTTP status 0` with empty body) during player track activation, keeping the correlation context open for the subsequent completed response.
+- **Player Activation State Hygiene:** In `content/youtube-main.js`, verified player `tracklist` availability before applying caption track options and removed redundant reload calls that triggered aborted requests.
+- **Multi-Attempt Recovery Reliability:** Aligned Attempt 1 wait budget to 12s in `content/content.js` and streamlined recovery transitions to ensure Attempt 2 forced reactivation reliably executes when initial passive player capture times out.
+- **Consolidation Acceptance & Ledger Overflow Resolution:** In `sidebar/gemini-client.js`, aligned consolidation prompts with explicit source-window preservation requirements, enabled targeted repair when missing windows occur, and added resilient consolidation acceptance (`source-reduce-coverage-tolerated`) for complete, non-truncated reductions where window provenance is deterministically maintained in the sidecar ledger. Resolves final study-note synthesis failures on long videos (`lecture evidence is still too large for safe final synthesis`).
+
+## v1.0.31 — Evidence integrity and truthful stream completion
+
+- **Strict source-window validation:** Evidence packets require one timestamp anchor per assigned source window, meaningful content under every anchor, chronological order, and no duplicate anchors. Markerless prose can no longer claim full coverage by length alone. Identical complete window bodies repeated under different timestamps are also rejected as placeholder coverage.
+- **Loss-preserving evidence merge:** Initial and repair evidence are combined per source window. Only exact/whitespace-equivalent duplicate lines are deduplicated; distinct lines from both packets and leading context are preserved.
+- **Truthful SSE completion metadata:** Gemini and OpenAI-compatible streams no longer fabricate `STOP` when no finish reason was received. A transport `[DONE]` without a model finish reason is recorded distinctly; a normal reader EOF without a terminal signal remains `unknown_completion`. `MAX_TOKENS` remains explicitly truncated.
+- **Completion-aware evidence acceptance:** Evidence extraction and consolidation only accept packets with valid source-window coverage and a verifiable terminal signal. Diagnostics include missing, duplicate, out-of-order and repeated-content windows.
+- **Caption-ingestion baseline frozen:** `content/content.js`, `content/youtube-main.js`, `content/caption-parser.js` and `content/frame-quality.js` are byte-for-byte unchanged from v1.0.29.
+- **Verification:** 27 Node test files / 78 individual tests, JavaScript syntax checks, benchmark checks and package integrity are documented in `PHASE1-VALIDATION-v1.0.31.md`. Automated tests are mocked/offline and do not establish live Gemini quality or 100% HoverNotes parity.
+
+## v1.0.30 — Finalization pipeline root-cause fix & bounded multi-tier recovery
+
+v1.0.30 permanently resolves final AI study-note synthesis pipeline failures where evidence extraction aborted on concise or truncated transcript segments:
+- **SSE Stream Metadata Capture:** `streamGeminiSSE()` and `streamOpenAIExtension()` now capture all candidate finish metadata (`finishReason`, `blockReason`, `safetyRatings`, `usageMetadata`, `streamEndedNormally`). Detects `MAX_TOKENS` truncation explicitly instead of conflating it with normal stream completion, and enforces fail-closed handling for safety policy blocks.
+- **Deterministic Source-Window Validation:** Eliminated fragile, arbitrary 18% and 22% character-ratio floors in evidence extraction and consolidation. Replaced them with deterministic source-window validation (`validateEvidencePacket`), allowing concise but complete packets to pass regardless of character count.
+- **Bounded Multi-Tier Evidence Recovery:**
+  - *Tier 0 (Validation):* Complete packets covering all source windows pass immediately with 0 recovery calls.
+  - *Tier 1 (Targeted Repair):* When extraction is incomplete (missing window anchors) without `MAX_TOKENS`, requests completion for only the missing windows and merges them chronologically via `mergeEvidenceEntries()`.
+  - *Tier 2 (Adaptive Window Splitting):* When `MAX_TOKENS` truncation is detected or repair is insufficient, splits the chunk into window-aligned child chunks at 30-second boundaries via `splitChunkByWindows()` and extracts children independently.
+  - *Tier 3 (Raw Source Fallback):* If extraction and splitting fail with non-safety errors, retains the original timestamped transcript in a clearly marked fallback packet (`isRawSourceFallback: true`). The final renderer receives explicit instructions to translate and structure the raw source faithfully, preserving the original timestamped transcript as fallback evidence; final semantic coverage is still subject to validation.
+- **Safe Evidence Consolidation:** Consolidation validates source windows, performs targeted repair if windows are omitted, and retains original group packets without discarding evidence if reduction fails or exceeds ledger budget.
+- **Diagnostic Observability:** Comprehensive stage diagnostics for all extraction, repair, split, fallback, and consolidation lifecycles without logging sensitive caption contents or credentials.
 
 ## v1.0.29 — Final request-correlation correction & lifecycle cleanup
 

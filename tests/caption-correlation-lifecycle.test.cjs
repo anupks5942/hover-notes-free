@@ -324,8 +324,10 @@ test('Request Correlation & Cache Safety in Isolated Script', async (t) => {
     const listeners = {};
     let runtimeListener = null;
 
+    const testHooks = {};
     const windowObj = {
       __hoverNotesLoaded: false,
+      __HOVERNOTES_CONTENT_TEST_HOOKS__: testHooks,
       location: { href: `https://www.youtube.com/watch?v=${targetVid}`, origin: 'https://www.youtube.com' },
       addEventListener(evt, fn) { (listeners[evt] ||= []).push(fn); },
       postMessage(data, targetOrigin) {
@@ -374,7 +376,7 @@ test('Request Correlation & Cache Safety in Isolated Script', async (t) => {
       }
     }
 
-    return { outgoingMessages, runtimeListener, deliverMain };
+    return { outgoingMessages, runtimeListener, deliverMain, testHooks };
   }
 
   await t.test('1. Parsed cues are isolated in transcriptCache by trackKey', async () => {
@@ -594,5 +596,73 @@ test('Request Correlation & Cache Safety in Isolated Script', async (t) => {
     assert.equal(res.lines.length, 0, 'No lines returned so progress is not advanced in sidebar');
     assert.equal(res.transcriptText, '');
     assert.ok(res.diagnostic.length > 0, 'Diagnostic must explain failure');
+  });
+
+  await t.test('5. Attempt 1 timeout triggers fresh retry with forceReactivation and succeeds', async () => {
+    const { outgoingMessages, runtimeListener, deliverMain, testHooks } = setupIsolated('timeoutVid');
+
+    deliverMain({
+      type: 'CAPTION_TRACKS',
+      videoId: 'timeoutVid',
+      tracks: [{ languageCode: 'hi', vssId: 'a.hi', kind: 'asr', name: 'Hindi' }]
+    });
+
+    const slicePromise = new Promise(resolve => {
+      runtimeListener({ action: 'GET_TRANSCRIPT_SLICE', payload: { startTime: 0, endTime: 60 } }, {}, resolve);
+    });
+
+    await new Promise(r => setTimeout(r, 10));
+    const req1 = outgoingMessages.find(m => m.type === 'REQUEST_CAPTION_BODY');
+    assert.ok(req1);
+    assert.equal(req1.forceReactivation, false);
+
+    // Simulate Attempt 1 waiter timing out
+    const waiter1 = testHooks.captionBodyWaiters.get(req1.requestId);
+    assert.ok(waiter1);
+    clearTimeout(waiter1.timer);
+    testHooks.captionBodyWaiters.delete(req1.requestId);
+    waiter1.resolve({
+      requestId: req1.requestId,
+      videoId: 'timeoutVid',
+      vssId: 'a.hi',
+      kind: 'asr',
+      languageCode: 'hi',
+      format: '',
+      status: 0,
+      body: '',
+      responseCharacters: 0,
+      timeout: true,
+      contentType: '',
+      transport: 'none'
+    });
+
+    // Content script must trigger bounded Attempt 2 retry with forceReactivation: true
+    await new Promise(r => setTimeout(r, 15));
+    const requests = outgoingMessages.filter(m => m.type === 'REQUEST_CAPTION_BODY');
+    assert.equal(requests.length, 2, 'Must trigger attempt 2 retry on attempt 1 timeout');
+    const req2 = requests[1];
+    assert.equal(req2.forceReactivation, true, 'Retry must set forceReactivation: true');
+    assert.notEqual(req2.requestId, req1.requestId, 'Retry must use distinct requestId');
+
+    // Deliver successful cues for Attempt 2
+    const validJson3 = JSON.stringify({
+      events: [{ tStartMs: 0, dDurationMs: 4000, segs: [{ utf8: 'Recovered from timeout!' }] }]
+    });
+    deliverMain({
+      type: 'CAPTION_BODY',
+      requestId: req2.requestId,
+      videoId: 'timeoutVid',
+      languageCode: 'hi',
+      format: 'json3',
+      status: 200,
+      contentType: 'application/json',
+      body: validJson3,
+      responseCharacters: validJson3.length
+    });
+
+    const res = await slicePromise;
+    assert.equal(res.success, true);
+    assert.equal(res.itemCount, 1);
+    assert.ok(res.transcriptText.includes('Recovered from timeout!'));
   });
 });

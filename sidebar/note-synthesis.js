@@ -614,6 +614,298 @@
     return result.replace(/^\s*\n/gm, '').replace(/\n{3,}/g, '\n\n').trim();
   }
 
+  function findWindowAnchorPositions(text, startLabel) {
+    if (!text || !startLabel) return [];
+    const escaped = String(startLabel).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const altLabel = String(startLabel).replace(/^0(\d:)/, '$1');
+    const escapedAlt = altLabel !== startLabel
+      ? altLabel.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      : null;
+    const labelGroup = escapedAlt ? `(?:${escaped}|${escapedAlt})` : escaped;
+
+    // An anchor must begin a Markdown line. A timestamp mentioned inside prose,
+    // a hyperlink, or an example is not evidence that a source window was mapped.
+    const pattern = new RegExp(
+      `(?:^|\\n)[\\t ]*(?:(?:#{1,6}|[-*+])\\s*)?(?:\\*\\*)?\\[\\s*${labelGroup}(?:\\s*[-–—]\\s*(?:\\d{1,2}:)?\\d{2}:\\d{2})?\\s*\\](?:\\*\\*)?(?=[\\t ]|:|$)`,
+      'gim'
+    );
+    const positions = [];
+    let match;
+    while ((match = pattern.exec(String(text))) !== null) {
+      positions.push({
+        index: match.index,
+        endIndex: pattern.lastIndex,
+        raw: match[0],
+        label: startLabel
+      });
+    }
+    return positions;
+  }
+
+  function validateEvidencePacket(packetText, sourceWindows = []) {
+    const rawText = String(packetText || '').trim();
+    const windows = Array.isArray(sourceWindows) ? sourceWindows : [];
+    if (!windows.length) {
+      return {
+        valid: rawText.length > 0,
+        totalWindows: 0,
+        coveredWindows: 0,
+        missingWindows: [],
+        emptyWindows: [],
+        duplicateAnchors: [],
+        outOfOrderWindows: [],
+        repeatedWindowContent: [],
+        outputCharacters: rawText.length,
+        reasons: rawText.length === 0 ? ['Evidence packet is empty.'] : []
+      };
+    }
+
+    if (!rawText) {
+      return {
+        valid: false,
+        totalWindows: windows.length,
+        coveredWindows: 0,
+        missingWindows: windows.map(w => w.startLabel || formatTimestamp(w.bucket * 30)),
+        emptyWindows: [],
+        duplicateAnchors: [],
+        outOfOrderWindows: [],
+        repeatedWindowContent: [],
+        outputCharacters: 0,
+        reasons: ['Evidence packet is empty.']
+      };
+    }
+
+    const fenceCount = (rawText.match(/^```/gm) || []).length;
+    const hasUnclosedFence = fenceCount % 2 !== 0;
+    const allPositions = [];
+    const missingWindows = [];
+    const duplicateAnchors = [];
+    const outOfOrderWindows = [];
+
+    windows.forEach((win, windowIndex) => {
+      const label = win.startLabel || formatTimestamp(win.bucket * 30);
+      const matches = findWindowAnchorPositions(rawText, label);
+      if (!matches.length) {
+        missingWindows.push(label);
+        return;
+      }
+      if (matches.length > 1) duplicateAnchors.push(label);
+      allPositions.push({
+        startLabel: label,
+        window: win,
+        windowIndex,
+        index: matches[0].index,
+        endIndex: matches[0].endIndex
+      });
+    });
+
+    allPositions.sort((a, b) => a.index - b.index);
+    for (let i = 1; i < allPositions.length; i++) {
+      if (allPositions[i].windowIndex <= allPositions[i - 1].windowIndex) {
+        outOfOrderWindows.push(allPositions[i].startLabel);
+      }
+    }
+
+    const emptyWindows = [];
+    const normalizedWindowBodies = new Map();
+    for (let i = 0; i < allPositions.length; i++) {
+      const current = allPositions[i];
+      const nextStart = i + 1 < allPositions.length ? allPositions[i + 1].index : rawText.length;
+      const contentSlice = rawText.slice(current.endIndex, nextStart).trim();
+      const stripped = contentSlice
+        .replace(/^[-*#:>\s]+/, '')
+        .replace(/[-*#:>\s]+$/, '')
+        .trim();
+      const isPlaceholder = /^(?:n\/?a|none|placeholder|\.\.\.|nothing|no content|nil|null|empty)[.\s]*$/i.test(stripped);
+      if (stripped.length < 15 || isPlaceholder) emptyWindows.push(current.startLabel);
+
+      // Exact whole-window repetition is a common placeholder failure. Compare
+      // normalized complete bodies, not individual repeated terms, so normal
+      // recurring terminology does not trigger this guard.
+      const normalizedBody = stripped
+        .replace(/^#{1,6}\s+/gm, '')
+        .replace(/^[-*+]\s+/gm, '')
+        .replace(/[*_~`]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLocaleLowerCase();
+      if (normalizedBody.length >= 15) {
+        if (!normalizedWindowBodies.has(normalizedBody)) normalizedWindowBodies.set(normalizedBody, []);
+        normalizedWindowBodies.get(normalizedBody).push(current.startLabel);
+      }
+    }
+    const repeatedWindowContent = [...normalizedWindowBodies.values()]
+      .filter(labels => labels.length > 1)
+      .flat();
+
+    const reasons = [];
+    if (missingWindows.length) {
+      reasons.push(`Missing ${missingWindows.length} source window anchor(s): ${missingWindows.slice(0, 10).join(', ')}${missingWindows.length > 10 ? '...' : ''}`);
+    }
+    if (duplicateAnchors.length) {
+      reasons.push(`Duplicate source window anchor(s): ${duplicateAnchors.slice(0, 10).join(', ')}${duplicateAnchors.length > 10 ? '...' : ''}`);
+    }
+    if (outOfOrderWindows.length) {
+      reasons.push(`Out-of-order source window anchor(s): ${outOfOrderWindows.slice(0, 10).join(', ')}${outOfOrderWindows.length > 10 ? '...' : ''}`);
+    }
+    if (repeatedWindowContent.length) {
+      reasons.push(`Identical whole-window evidence repeated across source windows: ${[...new Set(repeatedWindowContent)].slice(0, 10).join(', ')}`);
+    }
+    if (emptyWindows.length) {
+      reasons.push(`Empty or placeholder evidence for ${emptyWindows.length} source window(s): ${emptyWindows.slice(0, 10).join(', ')}${emptyWindows.length > 10 ? '...' : ''}`);
+    }
+    if (hasUnclosedFence) reasons.push('Unclosed code or markdown fence detected in evidence packet.');
+
+    const coveredWindows = windows.length - missingWindows.length;
+    const valid = missingWindows.length === 0 &&
+      duplicateAnchors.length === 0 &&
+      outOfOrderWindows.length === 0 &&
+      repeatedWindowContent.length === 0 &&
+      emptyWindows.length === 0 &&
+      !hasUnclosedFence;
+
+    return {
+      valid,
+      totalWindows: windows.length,
+      coveredWindows,
+      missingWindows,
+      emptyWindows,
+      duplicateAnchors,
+      outOfOrderWindows,
+      repeatedWindowContent: [...new Set(repeatedWindowContent)],
+      outputCharacters: rawText.length,
+      reasons
+    };
+  }
+
+  function mergeEvidenceEntries(initialText, repairText, sourceWindows = []) {
+    const windows = Array.isArray(sourceWindows) ? sourceWindows : [];
+    if (!windows.length) return [initialText, repairText].filter(Boolean).join('\n\n');
+
+    const extractEntries = text => {
+      const source = String(text || '');
+      const positions = [];
+      for (const win of windows) {
+        const label = win.startLabel || formatTimestamp(win.bucket * 30);
+        for (const match of findWindowAnchorPositions(source, label)) {
+          positions.push({ label, index: match.index, endIndex: match.endIndex, raw: match.raw });
+        }
+      }
+      positions.sort((a, b) => a.index - b.index);
+      const preamble = positions.length ? source.slice(0, positions[0].index).trim() : source.trim();
+      const entriesByLabel = new Map();
+      for (let i = 0; i < positions.length; i++) {
+        const current = positions[i];
+        const nextStart = i + 1 < positions.length ? positions[i + 1].index : source.length;
+        const body = source.slice(current.endIndex, nextStart).trim();
+        if (!entriesByLabel.has(current.label)) entriesByLabel.set(current.label, []);
+        entriesByLabel.get(current.label).push(body);
+      }
+      return { entriesByLabel, preamble };
+    };
+
+    const initialExtracted = extractEntries(initialText);
+    const repairExtracted = extractEntries(repairText);
+    const initialMap = initialExtracted.entriesByLabel;
+    const repairMap = repairExtracted.entriesByLabel;
+    const mergedBlocks = [];
+
+    for (const win of windows) {
+      const label = win.startLabel || formatTimestamp(win.bucket * 30);
+      const fragments = [
+        ...(initialMap.get(label) || []),
+        ...(repairMap.get(label) || [])
+      ].map(value => String(value || '').trim()).filter(Boolean);
+
+      // Remove only byte-for-byte/whitespace-equivalent duplicate fragments.
+      // Never choose the repair packet instead of the original packet: retain
+      // every distinct initial and repair detail for this source window.
+      const seenLines = new Set();
+      const preservedFragments = fragments.map(fragment => {
+        const uniqueLines = String(fragment).split(/\r?\n/).filter(line => {
+          const canonical = line.replace(/\s+/g, ' ').trim();
+          if (!canonical) return true;
+          if (seenLines.has(canonical)) return false;
+          seenLines.add(canonical);
+          return true;
+        });
+        return uniqueLines.join('\n').trim();
+      }).filter(Boolean);
+      if (preservedFragments.length) {
+        mergedBlocks.push(`### [${label}]\n${preservedFragments.join('\n\n')}`);
+      }
+    }
+
+    if (!mergedBlocks.length) return [initialText, repairText].filter(Boolean).join('\n\n');
+
+    const preambleLines = [initialExtracted.preamble, repairExtracted.preamble]
+      .flatMap(value => String(value || '').split(/\r?\n/))
+      .map(line => line.trimEnd());
+    const seenPreamble = new Set();
+    const preservedPreamble = preambleLines.filter(line => {
+      const canonical = line.replace(/\s+/g, ' ').trim();
+      if (!canonical) return true;
+      if (seenPreamble.has(canonical)) return false;
+      seenPreamble.add(canonical);
+      return true;
+    }).join('\n').trim();
+
+    return [preservedPreamble, mergedBlocks.join('\n\n')].filter(Boolean).join('\n\n');
+  }
+
+  function splitChunkByWindows(chunk, sourceWindows, parts = 2, intervalSeconds = 30) {
+    const windows = Array.isArray(sourceWindows) ? sourceWindows : (chunk?.windows || []);
+    const count = Math.max(2, Math.min(windows.length, Number(parts) || 2));
+    if (windows.length <= 1) return [chunk];
+
+    const interval = Math.max(15, Math.min(120, Number(intervalSeconds) || 30));
+    const splitSize = Math.ceil(windows.length / count);
+    const childChunks = [];
+
+    for (let p = 0; p < count; p++) {
+      const subset = windows.slice(p * splitSize, (p + 1) * splitSize);
+      if (!subset.length) continue;
+
+      const startBucket = subset[0].bucket;
+      const endBucket = subset[subset.length - 1].bucket;
+      const startTime = startBucket * interval;
+      const endTime = (endBucket + 1) * interval - 1;
+
+      const childLines = (chunk.lines || []).filter(line => {
+        const sec = parseTimestampSeconds(line);
+        if (sec === null) return false;
+        const b = Math.floor(sec / interval);
+        return b >= startBucket && b <= endBucket;
+      });
+
+      const childTranscriptText = childLines.join('\n');
+      childChunks.push({
+        lines: childLines,
+        transcriptText: childTranscriptText,
+        characterCount: childTranscriptText.length,
+        startTime,
+        endTime,
+        startLabel: subset[0].startLabel,
+        endLabel: subset[subset.length - 1].endLabel,
+        windows: subset
+      });
+    }
+
+    return childChunks;
+  }
+
+  function getTranscriptLinesForWindows(lines, windowLabels, intervalSeconds = 30) {
+    const targetLabels = new Set(Array.isArray(windowLabels) ? windowLabels : [windowLabels]);
+    const interval = Math.max(15, Math.min(120, Number(intervalSeconds) || 30));
+    return (lines || []).filter(line => {
+      const sec = parseTimestampSeconds(line);
+      if (sec === null) return false;
+      const bucket = Math.floor(sec / interval);
+      const label = formatTimestamp(bucket * interval);
+      return targetLabels.has(label);
+    }).join('\n');
+  }
+
   window.HoverNotesNoteSynthesis = Object.freeze({
     splitDocument,
     parseTimestampSeconds,
@@ -635,6 +927,10 @@
     restoreManagedScreenshotBlocks,
     extractVisualContext,
     validateOutput,
-    stripInternalMarkers
+    stripInternalMarkers,
+    validateEvidencePacket,
+    mergeEvidenceEntries,
+    splitChunkByWindows,
+    getTranscriptLinesForWindows
   });
 })();
